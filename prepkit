@@ -1,0 +1,470 @@
+-- Snowflake Interview Preparation & Scenario-Based Q&A
+-- Co-authored with CoCo
+
+/*
+╔══════════════════════════════════════════════════════════════════════════════╗
+║         SNOWFLAKE INTERVIEW PREP - DATA ENGINEER / ANALYST                 ║
+║                                                                            ║
+║  Covers: Conceptual, SQL, Architecture, Scenario, Behavioral              ║
+║  Level:  Junior → Senior Data Engineer                                     ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+*/
+
+-- ============================================================================
+-- SECTION 1: CORE CONCEPTS (Most Frequently Asked)
+-- ============================================================================
+
+/*
+Q1: Explain Snowflake's architecture.
+─────────────────────────────────────
+A: Snowflake has a unique 3-layer shared-data architecture:
+   1. Storage Layer - centralized on cloud object storage (S3/Blob/GCS),
+      data stored in columnar, compressed micro-partitions (50-500 MB each).
+   2. Compute Layer - independent virtual warehouses (VMs clusters) that
+      can scale up/down and out. Multiple warehouses access same data simultaneously.
+   3. Cloud Services Layer - brain of the system: authentication, metadata,
+      query optimization, transactions, security. Always running.
+
+   Key advantage: Storage and compute scale INDEPENDENTLY. You can have
+   10 warehouses reading the same data without copying it.
+
+
+Q2: What are micro-partitions?
+──────────────────────────────
+A: Immutable, compressed columnar storage units (50-500 MB uncompressed).
+   Snowflake auto-creates them as data is loaded. Each partition stores
+   metadata (min/max values, distinct count, null count) which enables
+   "partition pruning" — skipping irrelevant partitions during queries.
+   Think of it like automatic indexing without any management.
+
+
+Q3: Difference between Clustering and Indexing?
+──────────────────────────────────────────────
+A: Snowflake has NO traditional indexes.
+   • Clustering Key = defines how data is physically ORDERED across micro-partitions
+   • Benefits: improves partition pruning for large tables (>1TB)
+   • Auto-maintained (Automatic Clustering service re-clusters as data changes)
+   • Cost: maintenance uses serverless credits
+   • When to use: large tables filtered frequently on specific columns (date, region)
+
+
+Q4: What is Zero-Copy Cloning?
+──────────────────────────────
+A: CREATE TABLE clone_table CLONE source_table;
+   Creates an instant copy that references the same micro-partitions.
+   • No additional storage cost until data diverges
+   • Works on tables, schemas, and databases
+   • Use cases: dev/test environments, pre-deployment backups, experimentation
+   • Also supports Time Travel cloning: CLONE ... AT(TIMESTAMP => ...)
+
+
+Q5: Time Travel vs Fail-Safe?
+─────────────────────────────
+A: Time Travel:
+   • User-accessible, query historical data (AT/BEFORE clauses)
+   • Retention: 0-1 day (Standard), 0-90 days (Enterprise)
+   • Use: UNDROP, clone from point-in-time, audit
+
+   Fail-Safe:
+   • NOT user-accessible (Snowflake support only)
+   • Fixed 7-day period AFTER Time Travel expires
+   • Disaster recovery only
+   • Cost: additional storage for 7 days
+
+   Storage cost = Active + Time Travel + Fail-Safe
+
+
+Q6: Types of tables and when to use each?
+──────────────────────────────────────────
+A: • Permanent (default): full Time Travel + Fail-Safe. Use for production data.
+   • Transient: Time Travel (0-1 day), NO Fail-Safe. Use for staging, ETL intermediates.
+   • Temporary: session-scoped, no TT, no FS. Use for ad-hoc analysis within a session.
+   • External: data remains outside Snowflake (your S3). Read-only, no TT/FS.
+   • Dynamic: auto-refreshed based on a defining query and target lag.
+
+
+Q7: Explain Virtual Warehouses and Multi-cluster.
+─────────────────────────────────────────────────
+A: Virtual Warehouse = a cluster of compute resources (CPU, memory, SSD cache).
+   • Sizes: XS (1 node) to 6XL (512 nodes). Each size up = 2x resources, 2x cost.
+   • Multi-cluster: auto-scales OUT (adds more clusters) for concurrency.
+     - STANDARD policy: spins up cluster as soon as queue forms
+     - ECONOMY policy: waits until 6-min load threshold (saves credits)
+   • Scale UP for complex queries; Scale OUT for many concurrent queries.
+
+
+Q8: Streams vs Dynamic Tables?
+──────────────────────────────
+A: Streams:
+   • Track row-level changes (CDC) on a source table
+   • Imperative: YOU write the merge/insert logic
+   • Consumed on DML (offset advances after successful read)
+   • Best for: complex transformations, conditional processing
+
+   Dynamic Tables:
+   • Declarative: define WHAT result you want, Snowflake handles HOW/WHEN
+   • Set TARGET_LAG for freshness (e.g., '1 hour')
+   • Auto-incremental refresh
+   • Best for: straightforward transformations, replacing Stream+Task chains
+   • Limitation: can't do imperative logic (conditionals, loops)
+*/
+
+
+-- ============================================================================
+-- SECTION 2: SQL SCENARIOS (Coding Round)
+-- ============================================================================
+
+-- Scenario 1: Find the 2nd highest salary per department
+-- (Classic, tests window functions)
+SELECT department, employee_name, salary
+FROM employees
+QUALIFY DENSE_RANK() OVER (PARTITION BY department ORDER BY salary DESC) = 2;
+
+-- Scenario 2: Running total that resets each month
+SELECT
+    order_date,
+    amount,
+    SUM(amount) OVER (
+        PARTITION BY DATE_TRUNC('MONTH', order_date)
+        ORDER BY order_date
+        ROWS UNBOUNDED PRECEDING
+    ) AS monthly_running_total
+FROM orders;
+
+-- Scenario 3: Find gaps in sequential IDs
+WITH numbered AS (
+    SELECT id, id - ROW_NUMBER() OVER (ORDER BY id) AS grp
+    FROM my_table
+)
+SELECT MIN(id) AS gap_start, MAX(id) AS gap_end
+FROM numbered
+GROUP BY grp
+HAVING COUNT(*) > 1;
+
+-- Scenario 4: Customer who made purchases in 3+ consecutive months
+WITH monthly_purchases AS (
+    SELECT
+        customer_id,
+        DATE_TRUNC('MONTH', order_date) AS month,
+        ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY DATE_TRUNC('MONTH', order_date)) AS rn
+    FROM orders
+    GROUP BY 1, 2
+),
+grouped AS (
+    SELECT
+        customer_id,
+        DATEADD('MONTH', -rn, month) AS grp
+    FROM monthly_purchases
+)
+SELECT customer_id, COUNT(*) AS consecutive_months
+FROM grouped
+GROUP BY customer_id, grp
+HAVING COUNT(*) >= 3;
+
+-- Scenario 5: Deduplicate with latest record per key
+-- Method 1: QUALIFY (Snowflake-preferred)
+SELECT * FROM raw_data
+QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY updated_at DESC) = 1;
+
+-- Method 2: MERGE pattern for idempotent dedup
+MERGE INTO target t USING (
+    SELECT * FROM source
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY updated_at DESC) = 1
+) s ON t.id = s.id
+WHEN MATCHED AND s.updated_at > t.updated_at THEN UPDATE SET ...
+WHEN NOT MATCHED THEN INSERT ...;
+
+-- Scenario 6: Sessionization (gap-based sessions from events)
+WITH lagged AS (
+    SELECT
+        user_id,
+        event_time,
+        LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time) AS prev_time,
+        CASE WHEN DATEDIFF('MINUTE', LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time), event_time) > 30
+             THEN 1 ELSE 0 END AS new_session
+    FROM events
+)
+SELECT
+    user_id,
+    event_time,
+    SUM(new_session) OVER (PARTITION BY user_id ORDER BY event_time ROWS UNBOUNDED PRECEDING) + 1 AS session_id
+FROM lagged;
+
+-- Scenario 7: Year-over-Year comparison
+SELECT
+    DATE_TRUNC('MONTH', order_date) AS month,
+    SUM(revenue) AS current_year_revenue,
+    LAG(SUM(revenue), 12) OVER (ORDER BY DATE_TRUNC('MONTH', order_date)) AS prior_year_revenue,
+    ROUND((SUM(revenue) - LAG(SUM(revenue), 12) OVER (ORDER BY DATE_TRUNC('MONTH', order_date)))
+        / NULLIF(LAG(SUM(revenue), 12) OVER (ORDER BY DATE_TRUNC('MONTH', order_date)), 0) * 100, 2) AS yoy_growth
+FROM orders
+GROUP BY 1;
+
+
+-- ============================================================================
+-- SECTION 3: ARCHITECTURE & DESIGN SCENARIOS
+-- ============================================================================
+
+/*
+Q: Design a real-time data pipeline in Snowflake.
+─────────────────────────────────────────────────
+A: Options by latency requirement:
+
+   Near Real-time (seconds):
+   • Snowpipe + Stream + Task (event-driven)
+   • Source → S3 → SNS → Snowpipe → Raw Table → Stream → Task → Analytics
+
+   Low-latency (minutes):
+   • Dynamic Tables with TARGET_LAG = '1 minute'
+   • Simplest to manage, auto-incremental
+
+   Batch (hours):
+   • COPY INTO on schedule (Tasks with CRON)
+   • Most cost-effective for non-urgent data
+
+   Architecture answer:
+   "I'd use Snowpipe for automated ingestion triggered by S3 events.
+    Raw data lands in a VARIANT column for schema flexibility.
+    A Stream captures changes, and a downstream Task runs MERGE
+    into a typed staging table every 5 minutes.
+    Dynamic Tables handle the analytics layer with 1-hour target lag.
+    This gives us near-real-time ingestion with cost-efficient analytics refresh."
+
+
+Q: How do you handle slowly changing dimensions (SCD)?
+──────────────────────────────────────────────────────
+A: Type 1 (Overwrite):
+   MERGE INTO dim_customer t USING stg s ON t.customer_id = s.customer_id
+   WHEN MATCHED THEN UPDATE SET t.email = s.email, t.phone = s.phone ...
+   WHEN NOT MATCHED THEN INSERT ...;
+
+   Type 2 (Historical):
+   - Add columns: effective_from, effective_to, is_current
+   - On change: close old record (SET is_current=FALSE, effective_to=CURRENT_DATE)
+   - Insert new record with is_current=TRUE
+   - Snowflake's MERGE handles both in one statement
+
+   Type 2 with Streams:
+   - Stream on staging table detects changes
+   - Task processes: expire old + insert new in single transaction
+
+
+Q: How do you optimize a slow query?
+────────────────────────────────────
+A: Systematic approach:
+   1. Check Query Profile (Snowsight): identify bottlenecks
+   2. Look for:
+      - Spillage to disk → needs larger warehouse or better query
+      - Full table scans → add WHERE filters, clustering
+      - Exploding joins → check join conditions, use DISTINCT
+      - Remote I/O dominant → cold cache, or table needs clustering
+   3. Solutions by problem:
+      - Spillage: scale up warehouse OR reduce data scanned
+      - Poor pruning: add clustering key on filter columns
+      - Many small queries: batch them or use result cache
+      - Repeated patterns: create materialized view
+      - Point lookups: enable Search Optimization
+   4. Golden rule: filter early, join later, aggregate last
+
+
+Q: Snowflake cost optimization strategies?
+──────────────────────────────────────────
+A: Compute:
+   - Right-size warehouses (most queries work on SMALL)
+   - AUTO_SUSPEND = 60s (dev), 120-300s (prod)
+   - Multi-cluster with ECONOMY scaling for variable loads
+   - Resource monitors with SUSPEND triggers
+   - Move infrequent tasks to serverless
+
+   Storage:
+   - Transient tables for staging (no fail-safe)
+   - Temporary tables for session-only work
+   - Set TIME_TRAVEL retention to 0-1 for non-critical tables
+   - Drop unused clones/tables (they accumulate)
+
+   Query:
+   - Use result cache (repeat exact queries = free)
+   - Avoid SELECT * in production
+   - Clustering for large tables scanned frequently
+   - Materialized views for repeated aggregations
+*/
+
+
+-- ============================================================================
+-- SECTION 4: BEHAVIORAL / PROJECT DISCUSSION
+-- ============================================================================
+
+/*
+Q: Walk me through a data engineering project you built.
+────────────────────────────────────────────────────────
+A: (Use your OLIST capstone project!)
+
+"I built an end-to-end analytics platform for a Brazilian e-commerce company
+processing 100K+ orders. Here's the architecture:
+
+INGESTION: Raw CSV data from S3 loaded via COPY INTO with error handling
+(ON_ERROR='CONTINUE'). Used VARIANT for semi-structured review data.
+
+TRANSFORMATION: 3-layer medallion architecture:
+- RAW: exact source copy (8 tables, schema-on-read)
+- STAGING: cleaned, typed, deduplicated (7 tables, Stream+Task CDC)
+- CORE: star schema with fact table + dimensions
+- ANALYTICS: Dynamic Tables auto-refreshing customer, product, seller metrics
+
+ADVANCED FEATURES:
+- RFM segmentation using NTILE window functions
+- Cohort retention analysis with self-joins
+- Cortex AI sentiment analysis on Portuguese reviews
+- RBAC with Engineer/Analyst/Viewer roles
+
+RESULTS: Reduced reporting latency from daily batch to hourly refresh.
+Enabled self-serve analytics for 3 teams without exposing raw PII data."
+
+
+Q: How do you handle data quality?
+──────────────────────────────────
+A: "I implement quality at multiple layers:
+   1. Load time: FILE_FORMAT with FIELD_OPTIONALLY_ENCLOSED_BY, NULL_IF
+   2. Staging: NOT NULL constraints, data type casting, deduplication
+   3. Validation: row counts reconciliation, freshness checks
+   4. Monitoring: Snowflake DMFs (Data Metric Functions) for automated quality
+   5. Alerting: Tasks that check thresholds and notify via email/webhook
+
+   Example: After loading, I run:
+   SELECT COUNT(*) FROM staging WHERE pk_column IS NULL;
+   If > 0, the pipeline fails with an alert before bad data propagates."
+
+
+Q: How do you handle schema evolution?
+─────────────────────────────────────
+A: "For sources with changing schemas:
+   1. Ingest into VARIANT column (schema-on-read) → never breaks
+   2. Use FLATTEN to extract fields → views adapt to new fields
+   3. For typed tables: ALTER TABLE ADD COLUMN is online (no downtime)
+   4. Pattern: Raw (VARIANT) → Staging (typed, add new cols as they appear)
+   5. MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE in COPY for resilient loads"
+*/
+
+
+-- ============================================================================
+-- SECTION 5: QUICK-FIRE QUESTIONS
+-- ============================================================================
+
+/*
+Q: QUALIFY vs HAVING?
+A: HAVING filters groups (after GROUP BY). QUALIFY filters rows after window
+   function evaluation. QUALIFY eliminates need for subqueries.
+
+Q: LATERAL FLATTEN?
+A: LATERAL = correlated join. FLATTEN = unnests arrays/objects.
+   Together: join each row with its exploded semi-structured elements.
+
+Q: Snowpipe vs COPY INTO?
+A: Snowpipe = continuous, event-driven, serverless, small files.
+   COPY INTO = batch, scheduled, uses warehouse, large files.
+
+Q: External Table vs Regular Table?
+A: External: data stays in your S3/GCS. Read-only, no Time Travel, slower.
+   Regular: data in Snowflake-managed storage. Full features, fast.
+
+Q: What is INFORMATION_SCHEMA vs ACCOUNT_USAGE?
+A: INFORMATION_SCHEMA: real-time, current object metadata, no latency.
+   ACCOUNT_USAGE: historical (up to 1 year), 45-min to 3-hour latency.
+   Use ACCOUNT_USAGE for: query history, login history, storage, credits.
+
+Q: Explain Snowflake caching.
+A: 3 levels:
+   1. Result cache: 24 hrs, exact same query, FREE (Cloud Services layer)
+   2. Local disk cache: warehouse SSD, hot micro-partitions (same warehouse)
+   3. Remote disk: cloud storage read (coldest, most expensive)
+   Tip: same warehouse for same workload = better cache hits.
+
+Q: What is a Secure View?
+A: View where definition (SQL) is hidden from non-owners.
+   Required for data sharing. Slight performance cost (optimizer limited).
+   Use for: PII protection, sharing, multi-tenant access patterns.
+
+Q: How does Snowflake handle concurrency?
+A: Multi-cluster warehouses auto-scale out. Each cluster handles queries
+   independently. Combined with result cache = near-unlimited concurrency.
+   No locking for reads (MVCC via micro-partition versioning).
+
+Q: What's the difference between ROLE and USER?
+A: USER = identity (person or service account).
+   ROLE = set of privileges. Users are GRANTED roles.
+   Best practice: never grant privileges directly to users; always to roles.
+
+Q: Explain Snowflake Editions.
+A: Standard: basic features, 1-day Time Travel
+   Enterprise: +multi-cluster, +90-day TT, +materialized views, +masking
+   Business Critical: +HIPAA/PCI, +failover/failback, +Tri-Secret Secure
+   VPS: +dedicated infrastructure (gov/military)
+*/
+
+
+-- ============================================================================
+-- SECTION 6: HANDS-ON PRACTICE QUERIES (Run these on your OLIST data!)
+-- ============================================================================
+
+-- Practice 1: Window function - rank sellers by revenue within their state
+SELECT
+    SELLER_STATE,
+    SELLER_ID,
+    total_gmv,
+    RANK() OVER (PARTITION BY SELLER_STATE ORDER BY total_gmv DESC) AS state_rank
+FROM OLIST_ECOMMERCE.ANALYTICS.DT_SELLER_SCORECARD
+QUALIFY state_rank <= 3;
+
+-- Practice 2: Find month-over-month customer growth
+WITH monthly_new AS (
+    SELECT
+        DATE_TRUNC('MONTH', MIN(ORDER_PURCHASE_TIMESTAMP)) AS first_month,
+        COUNT(DISTINCT CUSTOMER_ID) AS new_customers
+    FROM OLIST_ECOMMERCE.RAW.RAW_ORDERS
+    GROUP BY CUSTOMER_ID
+)
+SELECT
+    first_month,
+    SUM(new_customers) AS new_customers,
+    LAG(SUM(new_customers)) OVER (ORDER BY first_month) AS prev_month,
+    ROUND((SUM(new_customers) - LAG(SUM(new_customers)) OVER (ORDER BY first_month))
+        * 100.0 / NULLIF(LAG(SUM(new_customers)) OVER (ORDER BY first_month), 0), 1) AS growth_pct
+FROM monthly_new
+GROUP BY first_month
+ORDER BY first_month;
+
+-- Practice 3: Pareto analysis (80/20 rule) - which products drive 80% of revenue?
+WITH product_revenue AS (
+    SELECT
+        PRODUCT_ID,
+        SUM(PRICE) AS revenue,
+        SUM(SUM(PRICE)) OVER (ORDER BY SUM(PRICE) DESC) AS cumulative_revenue,
+        SUM(SUM(PRICE)) OVER () AS total_revenue
+    FROM OLIST_ECOMMERCE.RAW.RAW_ORDER_ITEMS
+    GROUP BY 1
+)
+SELECT
+    COUNT(*) AS products_driving_80pct,
+    (SELECT COUNT(DISTINCT PRODUCT_ID) FROM OLIST_ECOMMERCE.RAW.RAW_ORDER_ITEMS) AS total_products,
+    ROUND(COUNT(*) * 100.0 / (SELECT COUNT(DISTINCT PRODUCT_ID) FROM OLIST_ECOMMERCE.RAW.RAW_ORDER_ITEMS), 1) AS pct_of_products
+FROM product_revenue
+WHERE cumulative_revenue <= total_revenue * 0.8;
+
+
+-- ============================================================================
+-- END OF INTERVIEW PREP
+-- ============================================================================
+/*
+STUDY STRATEGY:
+  1. Read Section 1 (concepts) - understand, don't memorize
+  2. Practice Section 2 (SQL) - write from scratch, then compare
+  3. Internalize Section 3 (architecture) - draw diagrams
+  4. Rehearse Section 4 (behavioral) - practice speaking out loud
+  5. Run Section 6 on your OLIST database - muscle memory
+
+REMEMBER: Interviewers value THOUGHT PROCESS over perfect syntax.
+  • Always clarify requirements before coding
+  • Talk through your approach before writing
+  • Mention trade-offs (cost vs performance vs complexity)
+  • Connect answers to real experience (your OLIST project!)
+*/
