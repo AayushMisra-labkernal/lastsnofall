@@ -1,0 +1,3329 @@
+-- Snowflake Complete Reference Notes for Data Engineers & Analysts
+-- Co-authored with CoCo
+
+/*
+╔══════════════════════════════════════════════════════════════════════════════╗
+║           SNOWFLAKE COMPLETE NOTES - DATA ENGINEERING & ANALYTICS           ║
+║                    Your Permanent Reference Guide                           ║
+║                    Author: Aayush Misra | Mentor: CoCo                     ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+TABLE OF CONTENTS:
+  1.  Architecture & Key Concepts
+  2.  Objects Hierarchy
+  3.  Data Types
+  4.  DDL - Creating & Managing Objects
+  5.  DML - Data Manipulation
+  6.  Data Loading (COPY INTO, Stages, Snowpipe)
+  7.  Data Transformation (CTEs, Window Functions, Pivoting)
+  8.  Performance Optimization (Clustering, Caching, Materialized Views)
+  9.  Time Travel & Fail-Safe
+  10. Streams & Tasks (CDC & Automation)
+  11. Dynamic Tables
+  12. Data Sharing & Marketplace
+  13. Security & RBAC
+  14. Snowpark (Python/Java/Scala)
+  15. Cortex AI & ML Functions
+  16. Cost Management
+  17. Best Practices Checklist
+  18. Stored Procedures & UDFs (SQL, JavaScript, Python)
+  19. Transactions & Concurrency (BEGIN/COMMIT, MVCC, Locking)
+  20. External Tables & Data Lake Integration
+  21. Common SQL Patterns & Tricks (GENERATOR, Recursive CTEs, PIVOT, LATERAL)
+  22. Troubleshooting & Debugging (Query Profile, EXPLAIN, Common Errors)
+  23. Certification & Interview Key Points (Gotchas, FAQ)
+*/
+
+
+-- ============================================================================
+-- 1. ARCHITECTURE & KEY CONCEPTS
+-- ============================================================================
+/*
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ SNOWFLAKE'S 3-LAYER ARCHITECTURE                                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  LAYER 3: CLOUD SERVICES (The Brain)                                  │  │
+│  │                                                                       │  │
+│  │  Think of this as the "control plane" — it manages everything but     │  │
+│  │  doesn't store your data or run your queries directly.                │  │
+│  │                                                                       │  │
+│  │  What it does:                                                        │  │
+│  │  • Authentication & Access Control – who can access what              │  │
+│  │  • Metadata Management – tracks every table, column, partition        │  │
+│  │  • Query Parsing & Optimization – turns SQL into an execution plan    │  │
+│  │  • Transaction Management – ensures ACID compliance                   │  │
+│  │  • Infrastructure Management – handles all the cloud plumbing         │  │
+│  │                                                                       │  │
+│  │  KEY INSIGHT: Cloud services are shared across all customers but      │  │
+│  │  fully isolated. You don't pay for this unless it exceeds 10% of     │  │
+│  │  your daily compute usage (rare for normal workloads).                │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  LAYER 2: COMPUTE (Virtual Warehouses - The Muscle)                   │  │
+│  │                                                                       │  │
+│  │  Virtual warehouses are INDEPENDENT compute clusters. Each one is     │  │
+│  │  like renting a separate "team of workers" that reads from the        │  │
+│  │  same shared storage. Multiple warehouses can query the same data     │  │
+│  │  simultaneously without competing for resources.                      │  │
+│  │                                                                       │  │
+│  │  What it does:                                                        │  │
+│  │  • Executes SQL queries, DML, data loading                           │  │
+│  │  • Sizes from XS (1 node) to 6XL (512 nodes)                        │  │
+│  │  • Scale UP = bigger warehouse for complex queries                   │  │
+│  │  • Scale OUT = multi-cluster for many concurrent users               │  │
+│  │  • Auto-suspend: stops billing when idle (set to 60s for dev!)       │  │
+│  │  • Auto-resume: starts automatically when a query arrives            │  │
+│  │                                                                       │  │
+│  │  REAL WORLD EXAMPLE: Your BI dashboard queries use warehouse "BI_WH" │  │
+│  │  while a data engineer runs heavy transformations on "ETL_WH".       │  │
+│  │  They never slow each other down — complete isolation.               │  │
+│  │                                                                       │  │
+│  │  COST: Each size doubles cost. XS=1 credit/hr, S=2, M=4, L=8...    │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  LAYER 1: STORAGE (Centralized - The Foundation)                      │  │
+│  │                                                                       │  │
+│  │  All data is stored in a single, centralized layer using the cloud    │  │
+│  │  provider's object storage (S3, Azure Blob, GCS). You never interact │  │
+│  │  with this directly — Snowflake manages it entirely.                  │  │
+│  │                                                                       │  │
+│  │  How data is stored (MICRO-PARTITIONS):                              │  │
+│  │  • Each table is divided into immutable files (50-500MB compressed)  │  │
+│  │  • Data stored in columnar format (only reads columns you need)      │  │
+│  │  • Automatically compressed (often 4-5x compression ratio)           │  │
+│  │  • IMMUTABLE = once written, never modified (enables Time Travel)    │  │
+│  │  • Updates create NEW micro-partitions, old ones kept for history    │  │
+│  │                                                                       │  │
+│  │  WHY THIS MATTERS:                                                    │  │
+│  │  • No vacuuming/compaction needed (unlike Postgres/MySQL)            │  │
+│  │  • Time Travel is "free" — old partitions already exist             │  │
+│  │  • Zero-copy cloning works because partitions are shared pointers   │  │
+│  │                                                                       │  │
+│  │  COST: ~$23/TB/month (on-demand) or ~$40/TB pre-paid/cheaper        │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+KEY DIFFERENTIATORS vs. Traditional Data Warehouses:
+
+  1. Separation of Storage & Compute
+     Traditional: One server does both storage AND processing (tied together)
+     Snowflake:   Storage and compute are independent — scale one without the other
+     Example:     Store 100TB but only spin up a Small warehouse for queries
+
+  2. Zero-Copy Cloning
+     Traditional: Copying a 1TB database takes 1TB of storage + hours
+     Snowflake:   CLONE creates an instant pointer copy — zero extra storage!
+     Example:     CREATE TABLE dev_orders CLONE prod_orders; -- instant, free
+
+  3. Semi-Structured Data Support
+     Traditional: ETL required to flatten JSON before loading
+     Snowflake:   Load JSON/Avro/Parquet as-is into VARIANT columns, query directly
+     Example:     SELECT payload:user.name FROM events; -- dot-notation on JSON
+
+  4. Near-Unlimited Concurrency
+     Traditional: 50 users on same server → everyone slows down
+     Snowflake:   Multi-cluster warehouse auto-scales for concurrent users
+     Example:     500 dashboard users trigger auto-scale from 1→10 clusters
+
+  5. No Index Management
+     Traditional: DBAs spend hours tuning indexes
+     Snowflake:   Automatic micro-partition pruning replaces indexes entirely
+     Example:     WHERE order_date = '2025-01-15' → skips irrelevant partitions
+
+  6. Cross-Cloud & Cross-Region Replication
+     Snowflake:   Replicate databases between AWS, Azure, GCP regions
+     Example:     Keep a read replica in EU for GDPR compliance
+*/
+
+
+-- ============================================================================
+-- 2. OBJECTS HIERARCHY
+-- ============================================================================
+/*
+  Snowflake organizes everything in a clean hierarchy. Understanding this
+  structure is essential because it determines how you grant permissions,
+  name objects, and organize your data.
+
+  ORGANIZATION (top level — groups multiple Snowflake accounts)
+    └── ACCOUNT (one deployment in a specific cloud + region, e.g., AWS us-east-1)
+         │
+         ├── USER         — a person or service account that logs in
+         ├── ROLE         — a set of privileges (assigned to users)
+         ├── WAREHOUSE    — compute resources (where queries actually run)
+         │
+         ├── DATABASE     — top-level container for related data
+         │    └── SCHEMA  — logical grouping within a database (like folders)
+         │         ├── TABLE (permanent, temporary, transient, external, dynamic)
+         │         ├── VIEW (regular, secure, materialized)
+         │         ├── STAGE (internal or external — for loading data)
+         │         ├── FILE FORMAT (defines how to parse CSV/JSON/Parquet)
+         │         ├── SEQUENCE (auto-incrementing counters)
+         │         ├── STREAM (change tracking on a table)
+         │         ├── TASK (scheduled SQL execution)
+         │         ├── PIPE (Snowpipe for continuous loading)
+         │         ├── UDF / UDTF / Stored Procedure (custom functions)
+         │         ├── DYNAMIC TABLE (declarative pipeline output)
+         │         └── TAG / MASKING POLICY / ROW ACCESS POLICY (governance)
+         │
+         ├── INTEGRATION (Storage, API, Notification — account-level configs)
+         ├── NETWORK POLICY (IP allow/deny lists)
+         └── RESOURCE MONITOR (budget controls)
+
+  NAMING CONVENTION (Fully Qualified Name):
+    database_name.schema_name.object_name
+    Example: MY_PROJECT_DB.RAW.ORDERS
+
+  WHY SCHEMAS MATTER:
+    • Permissions can be granted at schema level (all tables in a schema)
+    • Common pattern: RAW schema (landing zone), STAGING schema (cleaned),
+      ANALYTICS schema (business-ready)
+    • FUTURE GRANTS work per-schema: new tables auto-inherit permissions
+*/
+
+
+-- ============================================================================
+-- 3. DATA TYPES
+-- ============================================================================
+/*
+NUMERIC TYPES:
+  NUMBER(precision, scale)  — exact decimal. NUMBER(10,2) stores up to 99999999.99
+  INT / INTEGER             — alias for NUMBER(38,0). Whole numbers up to 38 digits
+  BIGINT                    — same as INT in Snowflake (both 38 digits)
+  FLOAT / DOUBLE            — approximate floating point (use for science, not money!)
+
+  WHEN TO USE WHAT:
+    • Money/prices → NUMBER(12,2) — exact, no rounding errors
+    • IDs/counts → INT — whole numbers
+    • Scientific data → FLOAT — when tiny precision loss is OK
+
+STRING TYPES:
+  VARCHAR(n)  — variable-length string, n = max bytes (default 16MB!)
+  CHAR(n)     — fixed-length, padded with spaces (rarely used)
+  STRING/TEXT — aliases for VARCHAR(16777216) — the default max
+
+  NOTE: In Snowflake, VARCHAR without a size limit costs nothing extra.
+  Unlike traditional DBs, there's no performance penalty for VARCHAR(16MB).
+
+BINARY:
+  BINARY(n)    — for raw bytes, hashes, encrypted data
+  VARBINARY(n) — same as BINARY in Snowflake
+
+BOOLEAN:
+  BOOLEAN — TRUE, FALSE, or NULL (three-valued logic!)
+  IMPORTANT: WHERE flag = TRUE is NOT the same as WHERE flag IS NOT FALSE
+             (the latter also excludes NULLs)
+
+DATE/TIME TYPES:
+  DATE              — just the date (2025-07-24), no time component
+  TIME              — just the time (14:30:00.000), no date
+  TIMESTAMP_NTZ     — "No Time Zone" — stores exactly what you insert
+  TIMESTAMP_LTZ     — "Local Time Zone" — stores in UTC, displays in session TZ
+  TIMESTAMP_TZ      — "With Time Zone" — stores the value + its timezone offset
+
+  WHEN TO USE WHAT:
+    • Event timestamps from apps → TIMESTAMP_NTZ (most common in data engineering)
+    • User-facing times (show in their local TZ) → TIMESTAMP_LTZ
+    • Global events where TZ matters → TIMESTAMP_TZ
+
+SEMI-STRUCTURED TYPES (Snowflake's superpower!):
+  VARIANT  — can hold ANY value: number, string, boolean, array, object, null
+  OBJECT   — key-value pairs (like a JSON object / Python dict)
+  ARRAY    — ordered list of values (like a JSON array / Python list)
+
+  WHY VARIANT IS POWERFUL:
+    • Load raw JSON without defining a schema upfront
+    • Query nested data with dot notation and bracket notation
+    • Snowflake automatically optimizes storage (columnar under the hood!)
+
+GEOSPATIAL:
+  GEOGRAPHY — spherical Earth model (lat/long coordinates)
+  GEOMETRY  — flat plane model (projected coordinates)
+
+VECTOR:
+  VECTOR(FLOAT, 768) — fixed-dimension vector for AI/ML embeddings
+*/
+
+-- Practical examples showing each type in action:
+SELECT
+    -- Numeric
+    123.456::NUMBER(10,2)          AS price,            -- 123.46 (rounded!)
+    1000000::INT                   AS user_count,       -- exact integer
+    3.14159::FLOAT                 AS pi_approx,        -- floating point
+
+    -- String
+    'Hello Snowflake'::VARCHAR     AS greeting,
+    LENGTH('Hello')                AS str_length,       -- 5
+
+    -- Date/Time
+    CURRENT_DATE()                 AS today,            -- 2025-07-24
+    CURRENT_TIMESTAMP()            AS now_with_tz,      -- full timestamp
+    DATEDIFF('day', '2025-01-01', CURRENT_DATE()) AS days_this_year,
+
+    -- Semi-structured (the fun stuff!)
+    PARSE_JSON('{"name": "Aayush", "age": 22}') AS json_obj,
+    ARRAY_CONSTRUCT(1, 2, 3, 4, 5)              AS number_array,
+    OBJECT_CONSTRUCT('city', 'Mumbai', 'country', 'India') AS location_obj;
+
+-- Accessing semi-structured data:
+-- Suppose we have: {"user": {"name": "Aayush", "scores": [95, 87, 92]}}
+-- You'd access it like:
+--   column_name:user.name::STRING        → 'Aayush'
+--   column_name:user.scores[0]::INT      → 95
+--   column_name:user.scores[2]::INT      → 92
+
+
+-- ============================================================================
+-- 4. DDL - CREATING & MANAGING OBJECTS
+-- ============================================================================
+/*
+DDL = Data Definition Language — commands that CREATE, ALTER, or DROP objects.
+These define the STRUCTURE of your data warehouse. Think of it as "building
+the house" before you put furniture (data) in it.
+*/
+
+-- ─────────────────────────────────────────────────
+-- DATABASE & SCHEMA: Your organizational containers
+-- ─────────────────────────────────────────────────
+-- A database groups related schemas; a schema groups related tables/views.
+-- Standard pattern: one database per project/domain, multiple schemas for layers.
+
+CREATE DATABASE IF NOT EXISTS my_project_db
+    COMMENT = 'Main database for our e-commerce analytics project';
+
+-- The 3-layer architecture (industry standard pattern):
+CREATE SCHEMA IF NOT EXISTS my_project_db.raw
+    COMMENT = 'Landing zone: exact copies from source systems, no transformations';
+CREATE SCHEMA IF NOT EXISTS my_project_db.staging
+    COMMENT = 'Cleaned & typed data: deduplication, type casting, null handling';
+CREATE SCHEMA IF NOT EXISTS my_project_db.analytics
+    COMMENT = 'Business-ready: aggregations, metrics, star schema for BI tools';
+
+-- WHY 3 layers?
+-- RAW: If source data changes, you have the original to re-process
+-- STAGING: Data quality checks happen here (catch issues early)
+-- ANALYTICS: Clean, fast tables optimized for dashboards & ad-hoc queries
+
+-- ─────────────────────────────────────────────────
+-- WAREHOUSE: Your compute engine
+-- ─────────────────────────────────────────────────
+-- A warehouse is a cluster of compute nodes. It reads data from storage,
+-- processes it, and returns results. You pay ONLY when it's running.
+
+CREATE WAREHOUSE IF NOT EXISTS analytics_wh
+    WAREHOUSE_SIZE = 'SMALL'           -- XS=1 credit/hr, S=2, M=4, L=8, XL=16...
+    AUTO_SUSPEND = 60                  -- suspend after 60s idle (SAVES MONEY!)
+    AUTO_RESUME = TRUE                 -- auto-start when a query comes in
+    MIN_CLUSTER_COUNT = 1              -- minimum clusters (for multi-cluster mode)
+    MAX_CLUSTER_COUNT = 3              -- max clusters (auto-scales for concurrency)
+    SCALING_POLICY = 'STANDARD'        -- STANDARD: add cluster when 1 query queues
+                                       -- ECONOMY: add cluster only when 6min of queueing
+    COMMENT = 'For analytics team queries and BI dashboard refreshes';
+
+-- SCALING EXPLAINED:
+-- Scale UP (bigger size): Use when a single query is slow (e.g., complex joins)
+--   ALTER WAREHOUSE analytics_wh SET WAREHOUSE_SIZE = 'MEDIUM';
+-- Scale OUT (more clusters): Use when many users queue at the same time
+--   MAX_CLUSTER_COUNT = 5 → allows up to 5 parallel clusters
+
+-- BEST PRACTICE: Separate warehouses for different workloads:
+--   ETL_WH (Medium, auto-suspend=120)  → for data loading & transforms
+--   BI_WH (Small, multi-cluster=1-5)   → for dashboards (many small queries)
+--   DEV_WH (XSmall, auto-suspend=60)   → for developer ad-hoc queries
+
+-- ─────────────────────────────────────────────────
+-- TABLE TYPES: Different tables for different needs
+-- ─────────────────────────────────────────────────
+
+-- PERMANENT TABLE (default): Full protection
+-- Gets: Time Travel (up to 90 days) + Fail-safe (7 days after Time Travel)
+-- Use for: Production data you can't afford to lose
+CREATE TABLE my_project_db.raw.orders (
+    order_id       VARCHAR(50) PRIMARY KEY,    -- PK is informational (not enforced!)
+    customer_id    VARCHAR(50) NOT NULL,       -- NOT NULL IS enforced
+    order_date     TIMESTAMP_NTZ,             -- when the order was placed
+    status         VARCHAR(20),               -- delivered, pending, cancelled
+    total_amount   NUMBER(12,2),              -- max 9,999,999,999.99
+    metadata       VARIANT,                   -- any JSON payload from the app
+    created_at     TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()  -- auto-set on insert
+);
+-- NOTE: PRIMARY KEY and UNIQUE constraints in Snowflake are NOT ENFORCED!
+-- They exist only as documentation/hints for the query optimizer.
+-- You must enforce uniqueness yourself (via MERGE or QUALIFY).
+
+-- TRANSIENT TABLE: Reduced protection, lower cost
+-- Gets: Time Travel (0-1 day only), NO Fail-safe
+-- Use for: Staging data, intermediate results, data you can re-derive
+CREATE TRANSIENT TABLE my_project_db.staging.stg_orders (
+    order_id       VARCHAR(50),
+    customer_id    VARCHAR(50),
+    order_date     TIMESTAMP_NTZ,
+    status         VARCHAR(20),
+    total_amount   NUMBER(12,2),
+    loaded_at      TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+)
+DATA_RETENTION_TIME_IN_DAYS = 1;  -- 0 or 1 for transient tables
+-- SAVES ~25% on storage costs compared to permanent tables (no fail-safe overhead)
+
+-- TEMPORARY TABLE: Session-only, disappears when session ends
+-- Gets: NO Time Travel, NO Fail-safe, invisible to other sessions
+-- Use for: Throwaway analysis, session-specific calculations
+CREATE TEMPORARY TABLE temp_high_value_customers AS
+SELECT customer_id, SUM(total_amount) AS lifetime_value
+FROM my_project_db.raw.orders
+GROUP BY 1
+HAVING lifetime_value > 10000;
+-- When you disconnect, this table is GONE. Other users can never see it.
+
+-- ─────────────────────────────────────────────────
+-- VIEWS: Saved queries (not data copies!)
+-- ─────────────────────────────────────────────────
+
+-- REGULAR VIEW: A saved query that runs fresh each time
+-- Pro: Always shows current data. Con: Query cost on every access.
+CREATE VIEW my_project_db.analytics.v_daily_revenue AS
+    SELECT
+        DATE_TRUNC('DAY', order_date) AS day,
+        COUNT(*) AS total_orders,
+        SUM(total_amount) AS revenue,
+        AVG(total_amount) AS avg_order_value
+    FROM my_project_db.raw.orders
+    WHERE status = 'delivered'
+    GROUP BY 1;
+-- Using it: SELECT * FROM analytics.v_daily_revenue WHERE day >= '2025-07-01';
+-- Behind the scenes, Snowflake runs the full query definition.
+
+-- SECURE VIEW: Same as above but hides the SQL definition from viewers
+-- Use when sharing data with other accounts or restricting DDL visibility
+CREATE SECURE VIEW my_project_db.analytics.sv_customer_orders AS
+    SELECT customer_id, order_date, total_amount
+    FROM my_project_db.raw.orders
+    WHERE status = 'delivered';
+-- Users with SELECT can query it, but can't see the WHERE clause or source table.
+-- Required for data sharing and row access policies.
+
+-- MATERIALIZED VIEW: Pre-computed and auto-refreshed by Snowflake
+-- Pro: Instant queries (data is stored). Con: Extra storage + auto-refresh cost.
+-- Use for: Expensive aggregations queried frequently.
+-- (Detailed example in section 8 - Performance)
+
+-- ─────────────────────────────────────────────────
+-- ZERO-COPY CLONE: Instant, free copies
+-- ─────────────────────────────────────────────────
+-- Cloning creates metadata pointers to the SAME micro-partitions.
+-- No data is copied until you modify the clone (copy-on-write).
+
+CREATE TABLE my_project_db.raw.orders_dev CLONE my_project_db.raw.orders;
+-- Instant! Zero additional storage. Perfect for dev/test environments.
+
+CREATE SCHEMA my_project_db.analytics_dev CLONE my_project_db.analytics;
+-- Clone an entire schema — all tables, views, etc. Still instant!
+
+CREATE DATABASE my_project_db_staging CLONE my_project_db;
+-- Clone the whole database for testing a migration. Free until you change data.
+
+-- COMMON USE CASES:
+-- 1. Dev/test environments: clone prod → run experiments → drop clone
+-- 2. Pre-migration backups: clone before ALTER TABLE
+-- 3. Data science sandboxes: clone → add columns → experiment freely
+
+
+-- ============================================================================
+-- 5. DML - DATA MANIPULATION
+-- ============================================================================
+/*
+DML = Data Manipulation Language — commands that INSERT, UPDATE, DELETE data.
+These modify the CONTENTS of tables (not their structure).
+
+IMPORTANT CONCEPT: In Snowflake, all DML operations create NEW micro-partitions.
+An UPDATE doesn't modify in-place — it marks old partitions as historical and
+writes new ones. This is why Time Travel works (old partitions still exist).
+*/
+
+-- ─────────────────────────────────────────────────
+-- INSERT: Adding new rows
+-- ─────────────────────────────────────────────────
+
+-- Single row insert (rare in production, common in testing)
+INSERT INTO my_project_db.raw.orders (order_id, customer_id, order_date, status, total_amount)
+VALUES ('ORD001', 'CUST123', '2025-01-15', 'delivered', 299.99);
+
+-- Multi-row insert (more efficient — one transaction for all rows)
+INSERT INTO my_project_db.raw.orders (order_id, customer_id, order_date, status, total_amount)
+VALUES
+    ('ORD002', 'CUST456', '2025-01-16', 'pending', 149.50),
+    ('ORD003', 'CUST789', '2025-01-16', 'delivered', 89.99),
+    ('ORD004', 'CUST123', '2025-01-17', 'shipped', 450.00);
+
+-- INSERT from SELECT (most common in data engineering — move data between tables)
+INSERT INTO my_project_db.analytics.monthly_summary
+SELECT
+    DATE_TRUNC('MONTH', order_date) AS month,
+    COUNT(*) AS order_count,
+    SUM(total_amount) AS total_revenue,
+    COUNT(DISTINCT customer_id) AS unique_customers
+FROM my_project_db.raw.orders
+WHERE status = 'delivered'
+GROUP BY 1;
+
+-- CREATE TABLE AS SELECT (CTAS) — create + fill in one step
+CREATE TABLE my_project_db.analytics.top_customers AS
+SELECT
+    customer_id,
+    COUNT(*) AS order_count,
+    SUM(total_amount) AS total_spent
+FROM my_project_db.raw.orders
+GROUP BY 1
+HAVING total_spent > 1000
+ORDER BY total_spent DESC;
+
+-- ─────────────────────────────────────────────────
+-- UPDATE: Modifying existing rows
+-- ─────────────────────────────────────────────────
+
+-- Simple update
+UPDATE my_project_db.raw.orders
+SET status = 'cancelled',
+    metadata = OBJECT_INSERT(metadata, 'cancelled_reason', 'customer_request')
+WHERE order_id = 'ORD001';
+
+-- Update with a join (update based on data from another table)
+UPDATE my_project_db.raw.orders o
+SET o.status = 'returned'
+FROM my_project_db.raw.returns r
+WHERE o.order_id = r.order_id
+  AND r.return_date IS NOT NULL;
+
+-- ─────────────────────────────────────────────────
+-- DELETE: Removing rows
+-- ─────────────────────────────────────────────────
+
+-- Simple delete
+DELETE FROM my_project_db.raw.orders WHERE status = 'test';
+
+-- Delete with subquery (remove orders from deactivated customers)
+DELETE FROM my_project_db.raw.orders
+WHERE customer_id IN (
+    SELECT customer_id FROM my_project_db.raw.customers WHERE is_active = FALSE
+);
+
+-- TRUNCATE: Delete ALL rows instantly (faster than DELETE for full table clear)
+TRUNCATE TABLE my_project_db.staging.stg_orders;
+-- No WHERE clause possible — it's all or nothing. Resets Time Travel.
+
+-- ─────────────────────────────────────────────────
+-- MERGE: Upsert — THE most important DML for data engineering!
+-- ─────────────────────────────────────────────────
+/*
+MERGE combines INSERT + UPDATE + DELETE in one atomic statement.
+It compares a SOURCE table against a TARGET table using a join condition,
+then decides what to do for matched vs. unmatched rows.
+
+WHY MERGE IS CRITICAL:
+  • Makes data loads IDEMPOTENT (safe to re-run without duplicates)
+  • Handles slowly changing dimensions (SCD Type 1 & 2)
+  • Essential for CDC (Change Data Capture) pipelines
+*/
+
+-- Example: Load new/updated orders from staging into production
+MERGE INTO my_project_db.raw.orders AS target
+USING my_project_db.staging.stg_orders AS source
+    ON target.order_id = source.order_id          -- match condition
+
+-- Row exists in both: update it (only if source is newer)
+WHEN MATCHED AND source.order_date > target.order_date THEN
+    UPDATE SET
+        target.status = source.status,
+        target.total_amount = source.total_amount,
+        target.metadata = source.metadata
+
+-- Row exists only in source: insert it
+WHEN NOT MATCHED THEN
+    INSERT (order_id, customer_id, order_date, status, total_amount, metadata)
+    VALUES (source.order_id, source.customer_id, source.order_date,
+            source.status, source.total_amount, source.metadata);
+
+-- You can also handle deletes:
+-- WHEN MATCHED AND source.is_deleted = TRUE THEN DELETE
+
+-- REAL WORLD PATTERN: Daily incremental load
+-- 1. Load today's data into staging.stg_orders (COPY INTO)
+-- 2. MERGE staging → raw (inserts new, updates changed)
+-- 3. TRUNCATE staging (clean up for tomorrow)
+-- This is idempotent: if the job runs twice, no duplicates!
+
+
+-- ============================================================================
+-- 6. DATA LOADING
+-- ============================================================================
+/*
+Getting data INTO Snowflake is one of the most common tasks. There are
+several methods, each suited to different scenarios:
+
+  METHOD              | WHEN TO USE
+  --------------------|----------------------------------------------------
+  COPY INTO           | Bulk loading (most common, best performance)
+  Snowpipe            | Continuous loading (files arrive throughout the day)
+  INSERT              | Small volumes, programmatic inserts
+  Snowpark/Connector  | Application-level data loading
+
+THE LOADING PIPELINE:
+  Source (S3/Azure/GCS/Local) → Stage → COPY INTO → Table
+
+  1. FILES sit in a STAGE (a pointer to a file location)
+  2. A FILE FORMAT tells Snowflake how to parse the files
+  3. COPY INTO reads files from the stage into your table
+*/
+
+-- ─────────────────────────────────────────────────
+-- FILE FORMATS: Tell Snowflake how to parse your files
+-- ─────────────────────────────────────────────────
+
+-- CSV format (most common for traditional ETL)
+CREATE FILE FORMAT my_csv_format
+    TYPE = 'CSV'
+    FIELD_DELIMITER = ','              -- what separates columns
+    SKIP_HEADER = 1                    -- first row is column names
+    NULL_IF = ('NULL', 'null', '')     -- these strings become SQL NULL
+    FIELD_OPTIONALLY_ENCLOSED_BY = '"' -- handles "quoted,fields" with commas
+    ERROR_ON_COLUMN_COUNT_MISMATCH = FALSE  -- allow rows with fewer columns
+    TRIM_SPACE = TRUE                  -- remove leading/trailing spaces
+    COMMENT = 'Standard CSV with headers and quoted fields';
+-- EXAMPLE FILE: "ORD001","CUST123","2025-01-15","delivered","299.99"
+
+-- JSON format (for API responses, event data, NoSQL exports)
+CREATE FILE FORMAT my_json_format
+    TYPE = 'JSON'
+    STRIP_OUTER_ARRAY = TRUE           -- unwrap [{"a":1},{"a":2}] into rows
+    ALLOW_DUPLICATE = FALSE            -- reject {"a":1, "a":2}
+    STRIP_NULL_VALUES = FALSE;         -- keep nulls (important for completeness)
+-- EXAMPLE FILE: [{"order_id":"ORD001","amount":299.99},{"order_id":"ORD002","amount":149.50}]
+
+-- Parquet format (columnar, compressed — best for large datasets from Spark/Python)
+CREATE FILE FORMAT my_parquet_format
+    TYPE = 'PARQUET'
+    SNAPPY_COMPRESSION = TRUE;         -- default compression
+-- Parquet is self-describing: column names/types are in the file metadata.
+-- Snowflake auto-detects schema: SELECT $1:column_name FROM @stage (auto)
+
+-- ─────────────────────────────────────────────────
+-- STAGES: Where files live before loading
+-- ─────────────────────────────────────────────────
+/*
+A STAGE is like a "landing pad" — a pointer to a file location.
+Three types:
+  1. Table Stage (@%table_name) — built-in for every table, limited features
+  2. User Stage (@~)           — personal stage for your user account
+  3. Named Stage (CREATE STAGE) — shared, configurable, most flexible
+*/
+
+-- Internal stage (files stored INSIDE Snowflake's managed storage)
+-- Use when: you upload files via SnowSQL or the UI
+CREATE STAGE my_internal_stage
+    FILE_FORMAT = my_csv_format
+    COMMENT = 'Internal stage for uploading local files via PUT command';
+-- Upload files: PUT file:///local/path/data.csv @my_internal_stage;
+
+-- External stage (files stay in YOUR cloud storage — Snowflake just reads them)
+-- Use when: files are already in S3/Azure/GCS (most production setups)
+CREATE STAGE my_s3_stage
+    URL = 's3://my-bucket/data/'
+    STORAGE_INTEGRATION = my_s3_integration    -- auth credentials (created separately)
+    FILE_FORMAT = my_csv_format
+    COMMENT = 'Points to our data lake in S3';
+
+-- LIST files in stage (see what's there before loading)
+LIST @my_s3_stage;
+-- Output: name, size, md5, last_modified
+
+LIST @my_s3_stage/orders/2025/07/;
+-- List only files in a specific "folder" path
+
+-- ─────────────────────────────────────────────────
+-- COPY INTO: Bulk Loading (the workhorse)
+-- ─────────────────────────────────────────────────
+
+-- Basic COPY INTO (load all files from a path)
+COPY INTO my_project_db.raw.orders
+FROM @my_s3_stage/orders/
+FILE_FORMAT = my_csv_format
+PATTERN = '.*orders.*\\.csv'           -- regex: only files matching this pattern
+ON_ERROR = 'CONTINUE';                 -- what to do on bad rows:
+  -- 'ABORT_STATEMENT' = fail entire load on first error (safest)
+  -- 'CONTINUE' = skip bad rows, load the rest (check COPY_HISTORY after!)
+  -- 'SKIP_FILE' = skip the entire file if it has any error
+  -- 'SKIP_FILE_10%' = skip file if >10% of rows are bad
+
+-- IMPORTANT: COPY INTO is IDEMPOTENT by default!
+-- Snowflake tracks which files have been loaded (by filename + checksum).
+-- Running COPY INTO twice won't duplicate data. To force reload:
+--   COPY INTO ... FORCE = TRUE;
+
+-- COPY INTO with transformation (reshape data during load)
+COPY INTO my_project_db.raw.orders (order_id, customer_id, order_date, status, total_amount)
+FROM (
+    SELECT
+        $1,                                         -- first CSV column
+        $2,                                         -- second column
+        TO_TIMESTAMP($3, 'YYYY-MM-DD HH24:MI:SS'), -- parse date string
+        UPPER($4),                                  -- uppercase status
+        $5::NUMBER(12,2)                            -- cast to decimal
+    FROM @my_s3_stage/orders/
+)
+FILE_FORMAT = my_csv_format;
+-- $1, $2, etc. refer to column positions in the file (1-indexed)
+
+-- Loading JSON data into a VARIANT column
+COPY INTO my_project_db.raw.events_json (event_data, loaded_at)
+FROM (
+    SELECT $1, CURRENT_TIMESTAMP()
+    FROM @my_s3_stage/events/
+)
+FILE_FORMAT = my_json_format;
+-- Each JSON object becomes one row with the full object in event_data
+
+-- Check load history (what was loaded? any errors?)
+SELECT *
+FROM TABLE(INFORMATION_SCHEMA.COPY_HISTORY(
+    TABLE_NAME => 'orders',
+    START_TIME => DATEADD('HOUR', -24, CURRENT_TIMESTAMP())
+))
+ORDER BY LAST_LOAD_TIME DESC;
+
+-- ─────────────────────────────────────────────────
+-- SNOWPIPE: Continuous/Automated Loading
+-- ─────────────────────────────────────────────────
+/*
+Snowpipe loads files AUTOMATICALLY as they arrive in your stage.
+It uses cloud event notifications (S3 events, Azure events, GCS Pub/Sub)
+to detect new files and load them within minutes.
+
+HOW IT WORKS:
+  1. New file lands in S3 bucket
+  2. S3 sends an SQS notification to Snowflake
+  3. Snowpipe picks up the notification
+  4. File is loaded into your table (using serverless compute — no warehouse!)
+
+COST: Serverless compute (0.06 credits/file approx) — cheaper than keeping
+      a warehouse running 24/7 to poll for new files.
+*/
+
+CREATE PIPE my_pipe
+    AUTO_INGEST = TRUE                 -- enable automatic file detection
+    COMMENT = 'Auto-loads new order files from S3'
+AS
+COPY INTO my_project_db.raw.orders
+FROM @my_s3_stage/orders/
+FILE_FORMAT = my_csv_format;
+-- After creating: configure S3 event notification to point to the SQS queue
+-- shown by: SELECT SYSTEM$PIPE_STATUS('my_pipe');
+
+-- Check pipe status
+SELECT SYSTEM$PIPE_STATUS('my_pipe');
+-- Shows: executionState, pendingFileCount, lastIngestedTimestamp
+
+-- Check Snowpipe load history
+SELECT *
+FROM TABLE(INFORMATION_SCHEMA.PIPE_USAGE_HISTORY(
+    DATE_RANGE_START => DATEADD('DAY', -7, CURRENT_TIMESTAMP())
+));
+
+
+-- ============================================================================
+-- 7. DATA TRANSFORMATION
+-- ============================================================================
+/*
+This is where data engineering really happens. You take raw data and
+transform it into something analysts can use. Key tools:
+
+  • CTEs (Common Table Expressions) — break complex queries into readable steps
+  • Window Functions — compute across rows without collapsing them
+  • PIVOT/UNPIVOT — reshape data between long and wide formats
+  • FLATTEN — explode semi-structured (JSON) data into rows
+  • QUALIFY — filter window function results elegantly (Snowflake specialty!)
+*/
+
+-- ─────────────────────────────────────────────────
+-- CTEs: Make complex queries readable
+-- ─────────────────────────────────────────────────
+/*
+CTE = WITH clause. It lets you define named temporary result sets
+that exist only for the duration of one query. Think of each CTE as
+a "step" in your analysis that you can reference by name.
+
+WHY USE CTEs:
+  • Readability: break a 100-line query into 5 clear steps
+  • Reusability: reference the same CTE multiple times
+  • Debugging: run each CTE independently to check intermediate results
+  • No performance cost: Snowflake optimizes CTEs like subqueries
+*/
+
+WITH
+-- Step 1: Aggregate orders by day (only delivered ones)
+daily_orders AS (
+    SELECT
+        DATE_TRUNC('DAY', order_date) AS order_day,
+        COUNT(*) AS order_count,
+        SUM(total_amount) AS revenue,
+        COUNT(DISTINCT customer_id) AS unique_customers
+    FROM my_project_db.raw.orders
+    WHERE status = 'delivered'
+    GROUP BY 1
+),
+-- Step 2: Add running totals and moving averages
+running_totals AS (
+    SELECT
+        order_day,
+        order_count,
+        revenue,
+        unique_customers,
+        -- Cumulative revenue from day 1 to current day
+        SUM(revenue) OVER (ORDER BY order_day) AS cumulative_revenue,
+        -- 7-day rolling average (smooths out daily spikes)
+        AVG(revenue) OVER (
+            ORDER BY order_day
+            ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+        ) AS rolling_7d_avg_revenue,
+        -- Day-over-day growth rate
+        revenue / NULLIF(LAG(revenue) OVER (ORDER BY order_day), 0) - 1 AS dod_growth
+    FROM daily_orders
+)
+-- Step 3: Final output
+SELECT
+    order_day,
+    order_count,
+    revenue,
+    ROUND(cumulative_revenue, 2) AS cumulative_revenue,
+    ROUND(rolling_7d_avg_revenue, 2) AS rolling_7d_avg,
+    ROUND(dod_growth * 100, 1) AS growth_pct
+FROM running_totals
+ORDER BY order_day;
+
+-- ─────────────────────────────────────────────────
+-- WINDOW FUNCTIONS: Compute across related rows
+-- ─────────────────────────────────────────────────
+/*
+Window functions perform calculations ACROSS a set of rows related to the
+current row — without collapsing them into one (unlike GROUP BY).
+
+SYNTAX: function() OVER (PARTITION BY ... ORDER BY ... ROWS/RANGE ...)
+
+  • PARTITION BY = groups rows (like GROUP BY but keeps all rows)
+  • ORDER BY = defines the order within each partition
+  • ROWS BETWEEN = defines the window frame (which rows to include)
+
+THREE CATEGORIES:
+  1. Ranking:     ROW_NUMBER, RANK, DENSE_RANK, NTILE
+  2. Aggregate:   SUM, AVG, COUNT, MIN, MAX (as window functions)
+  3. Navigation:  LAG, LEAD, FIRST_VALUE, LAST_VALUE, NTH_VALUE
+*/
+
+SELECT
+    customer_id,
+    order_id,
+    order_date,
+    total_amount,
+
+    -- ═══ RANKING ═══
+    -- ROW_NUMBER: unique sequential number (1,2,3,4...) — no ties
+    ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date)
+        AS order_sequence,
+    -- "This is the customer's 1st, 2nd, 3rd order..."
+
+    -- RANK: allows ties, skips numbers (1,2,2,4)
+    RANK() OVER (ORDER BY total_amount DESC)
+        AS revenue_rank,
+    -- "Two orders tied at rank 2, next is rank 4 (skip 3)"
+
+    -- DENSE_RANK: allows ties, NO gaps (1,2,2,3)
+    DENSE_RANK() OVER (ORDER BY total_amount DESC)
+        AS dense_revenue_rank,
+    -- "Two orders tied at rank 2, next is rank 3 (no skip)"
+
+    -- NTILE: divide into N equal buckets (for percentiles)
+    NTILE(4) OVER (ORDER BY total_amount DESC)
+        AS revenue_quartile,
+    -- "Top 25% = quartile 1, next 25% = quartile 2, etc."
+
+    -- ═══ AGGREGATES (running across partition) ═══
+    -- Total lifetime value for this customer
+    SUM(total_amount) OVER (PARTITION BY customer_id)
+        AS customer_lifetime_value,
+    -- "Sum of ALL orders for this customer (same value on every row)"
+
+    -- Average order value for this customer
+    AVG(total_amount) OVER (PARTITION BY customer_id)
+        AS avg_order_value,
+
+    -- Count of orders for this customer
+    COUNT(*) OVER (PARTITION BY customer_id)
+        AS total_customer_orders,
+
+    -- Running total (ordered): cumulative spend as orders come in
+    SUM(total_amount) OVER (
+        PARTITION BY customer_id
+        ORDER BY order_date
+        ROWS UNBOUNDED PRECEDING  -- from first row to current row
+    ) AS running_total,
+    -- "After order 1: $100, after order 2: $250, after order 3: $400..."
+
+    -- ═══ NAVIGATION (look at other rows) ═══
+    -- Previous order date (for this customer)
+    LAG(order_date, 1) OVER (PARTITION BY customer_id ORDER BY order_date)
+        AS prev_order_date,
+    -- "When did this customer last order? NULL for their first order."
+
+    -- Days since previous order
+    DATEDIFF('day',
+        LAG(order_date) OVER (PARTITION BY customer_id ORDER BY order_date),
+        order_date
+    ) AS days_since_last_order,
+    -- "How many days between orders? Useful for churn analysis."
+
+    -- Next order date (peek ahead)
+    LEAD(order_date, 1) OVER (PARTITION BY customer_id ORDER BY order_date)
+        AS next_order_date,
+
+    -- First ever order amount
+    FIRST_VALUE(total_amount) OVER (
+        PARTITION BY customer_id ORDER BY order_date
+    ) AS first_order_amount
+
+FROM my_project_db.raw.orders;
+
+-- ─────────────────────────────────────────────────
+-- QUALIFY: Filter on window function results
+-- ─────────────────────────────────────────────────
+/*
+QUALIFY is Snowflake's elegant solution to filtering window function results.
+Without it, you'd need a subquery or CTE. It works like HAVING but for
+window functions.
+
+ORDER OF EXECUTION:
+  FROM → WHERE → GROUP BY → HAVING → WINDOW FUNCTIONS → QUALIFY → ORDER BY
+*/
+
+-- Get the LATEST order per customer (a very common pattern!)
+SELECT customer_id, order_id, order_date, total_amount, status
+FROM my_project_db.raw.orders
+QUALIFY ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC) = 1;
+-- Without QUALIFY, you'd need:
+--   WITH ranked AS (SELECT *, ROW_NUMBER() OVER (...) AS rn FROM orders)
+--   SELECT * FROM ranked WHERE rn = 1;
+-- QUALIFY saves you a whole CTE!
+
+-- Get the top 3 orders by amount per customer
+SELECT customer_id, order_id, total_amount
+FROM my_project_db.raw.orders
+QUALIFY RANK() OVER (PARTITION BY customer_id ORDER BY total_amount DESC) <= 3;
+
+-- Deduplicate: keep only one row per order_id (latest by loaded_at)
+SELECT *
+FROM my_project_db.staging.stg_orders
+QUALIFY ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY loaded_at DESC) = 1;
+-- Essential pattern for data engineering! Source systems often send duplicates.
+
+-- ─────────────────────────────────────────────────
+-- PIVOT & UNPIVOT: Reshape data
+-- ─────────────────────────────────────────────────
+/*
+PIVOT: Rows → Columns (long → wide format)
+  Before: month | revenue        After: Jan | Feb | Mar | Apr
+          Jan   | 1000                 1000 | 1200 | 1500 | 1100
+          Feb   | 1200
+          Mar   | 1500
+
+UNPIVOT: Columns → Rows (wide → long format) — the reverse
+*/
+
+-- PIVOT example: monthly revenue by status as columns
+SELECT *
+FROM (
+    SELECT
+        DATE_TRUNC('MONTH', order_date)::DATE AS month,
+        status,
+        total_amount
+    FROM my_project_db.raw.orders
+)
+PIVOT (
+    SUM(total_amount)
+    FOR status IN ('delivered', 'pending', 'cancelled', 'shipped')
+) AS pivoted
+ORDER BY month;
+-- Result: month | 'delivered' | 'pending' | 'cancelled' | 'shipped'
+
+-- UNPIVOT example: turn quarterly columns back into rows
+-- Suppose table has: product_id, q1_sales, q2_sales, q3_sales, q4_sales
+-- UNPIVOT turns it into: product_id, quarter, sales
+SELECT * FROM quarterly_data
+    UNPIVOT (sales FOR quarter IN (q1_sales, q2_sales, q3_sales, q4_sales));
+
+-- ─────────────────────────────────────────────────
+-- FLATTEN: Explode semi-structured data into rows
+-- ─────────────────────────────────────────────────
+/*
+FLATTEN takes an ARRAY or OBJECT inside a VARIANT column and produces
+one row per element. Essential for working with JSON data.
+
+Think of it like Python's:
+  for item in json_data["items"]:
+      print(item["name"], item["price"])
+*/
+
+-- Example: orders table has metadata VARIANT column containing:
+-- {"items": [{"name": "Laptop", "price": 999}, {"name": "Mouse", "price": 25}]}
+
+SELECT
+    o.order_id,
+    f.index AS item_number,               -- 0, 1, 2... (position in array)
+    f.value:name::STRING AS product_name,  -- extract "name" field as string
+    f.value:price::NUMBER(10,2) AS price   -- extract "price" field as number
+FROM my_project_db.raw.orders o,
+    LATERAL FLATTEN(input => o.metadata:items) f;
+-- Result:
+--   order_id | item_number | product_name | price
+--   ORD001   | 0           | Laptop       | 999.00
+--   ORD001   | 1           | Mouse        | 25.00
+
+-- LATERAL FLATTEN explained:
+-- LATERAL = allows the FLATTEN to reference columns from the outer query (o.metadata)
+-- FLATTEN = takes an array/object and produces rows
+-- f.value = the current element
+-- f.index = position in the array
+-- f.key = key name (for objects, not arrays)
+
+-- Flatten nested objects (e.g., metadata:shipping.address.city)
+SELECT
+    o.order_id,
+    o.metadata:shipping.carrier::STRING AS carrier,
+    o.metadata:shipping.tracking_number::STRING AS tracking
+FROM my_project_db.raw.orders o
+WHERE o.metadata:shipping IS NOT NULL;
+-- No FLATTEN needed for simple dot-notation access!
+
+-- Recursive FLATTEN for deeply nested JSON
+SELECT
+    o.order_id,
+    f.path AS json_path,
+    f.key AS field_name,
+    f.value::STRING AS field_value
+FROM my_project_db.raw.orders o,
+    LATERAL FLATTEN(input => o.metadata, RECURSIVE => TRUE) f
+WHERE f.value IS NOT NULL;
+-- Explodes entire JSON tree into path/key/value rows — great for discovery!
+
+
+-- ============================================================================
+-- 8. PERFORMANCE OPTIMIZATION
+-- ============================================================================
+/*
+Snowflake handles most optimization automatically, but understanding these
+concepts helps you write faster queries and design better tables.
+
+═══ MICRO-PARTITIONS & PARTITION PRUNING ═══
+
+How it works:
+  1. Every table is divided into micro-partitions (50-500MB compressed files)
+  2. Snowflake stores metadata about each partition: min/max values per column
+  3. When you query with WHERE date = '2025-01-15', Snowflake checks metadata:
+     - Partition A: min_date=2025-01-01, max_date=2025-01-10 → SKIP (pruned!)
+     - Partition B: min_date=2025-01-14, max_date=2025-01-20 → READ (might have data)
+  4. This is called "partition pruning" — skipping irrelevant data
+
+WHY THIS MATTERS:
+  A 10TB table with dates from 2020-2025:
+  - SELECT * WHERE date = '2025-07-24' → might scan only 5GB (0.05%!)
+  - Without pruning → would scan all 10TB (200x slower & more expensive)
+
+═══ CACHING LAYERS (Free Performance!) ═══
+
+  LAYER 1: Result Cache (24 hours)
+    - Exact same query text + same underlying data = instant return
+    - Completely free, no compute needed
+    - Invalidated if underlying data changes
+
+  LAYER 2: Local Disk Cache (warehouse SSD)
+    - Micro-partitions cached on warehouse's local SSD
+    - Survives across queries (as long as warehouse is running)
+    - Why AUTO_SUSPEND = 60 is a tradeoff: suspending clears this cache!
+
+  LAYER 3: Remote Disk Cache (cloud storage)
+    - Reading from S3/Azure/GCS directly
+    - Slowest layer but still fast (cloud storage is quick)
+
+═══ CLUSTERING ═══
+
+  Natural clustering: data arrives in order (e.g., by date), so date-filtered
+  queries already prune well.
+
+  Explicit clustering: for large tables (>1TB) where queries filter on columns
+  that DON'T match the natural insertion order.
+
+  Example: If you always query WHERE customer_id = 'X' on a table loaded by date,
+  customer_id values are spread across ALL partitions → no pruning!
+  Clustering by customer_id physically reorganizes data so same customers are
+  in the same partitions → excellent pruning.
+
+  COST: Automatic Clustering is a background service that costs credits.
+        Only use on tables > 1TB with clear filter patterns.
+*/
+
+-- ─────────────────────────────────────────────────
+-- Clustering Key
+-- ─────────────────────────────────────────────────
+
+-- Add clustering key (for large tables with known filter patterns)
+ALTER TABLE my_project_db.raw.orders CLUSTER BY (order_date, status);
+-- Now Snowflake will reorganize data so rows with similar dates & statuses
+-- are stored in the same micro-partitions.
+
+-- Check clustering quality (how well organized is the data?)
+SELECT SYSTEM$CLUSTERING_INFORMATION('my_project_db.raw.orders', '(order_date)');
+-- Returns: average_overlaps, average_depth, partition_count
+-- average_depth close to 1.0 = well clustered (each date in ~1 partition)
+-- average_depth of 10.0 = poorly clustered (each date spread across 10 partitions)
+
+-- RULES OF THUMB:
+-- • Cluster by columns in your most common WHERE clauses
+-- • Max 3-4 columns in a clustering key
+-- • Put the most selective (high cardinality) column LAST
+-- • Date columns are usually the best first clustering key
+-- • Don't cluster tables under 1TB (partition pruning is usually enough)
+
+-- ─────────────────────────────────────────────────
+-- Materialized View: Pre-computed, auto-refreshed
+-- ─────────────────────────────────────────────────
+/*
+A Materialized View (MV) stores the query result physically and Snowflake
+auto-refreshes it when the source data changes.
+
+WHEN TO USE:
+  • An expensive aggregation query runs frequently (e.g., dashboard refresh)
+  • The source table is large but the result is small
+  • You need sub-second response times
+
+LIMITATIONS:
+  • Cannot use: joins, UDFs, HAVING, LIMIT, or nested views
+  • Works best for: simple GROUP BY aggregations on a single table
+  • Has storage + maintenance cost
+*/
+
+CREATE MATERIALIZED VIEW my_project_db.analytics.mv_daily_revenue AS
+    SELECT
+        DATE_TRUNC('DAY', order_date) AS day,
+        status,
+        COUNT(*) AS order_count,
+        SUM(total_amount) AS revenue,
+        AVG(total_amount) AS avg_amount
+    FROM my_project_db.raw.orders
+    GROUP BY 1, 2;
+-- Now: SELECT * FROM mv_daily_revenue WHERE day = '2025-07-24'
+-- Returns instantly from pre-computed storage (no scanning raw.orders!)
+
+-- ─────────────────────────────────────────────────
+-- Search Optimization Service (for needle-in-haystack lookups)
+-- ─────────────────────────────────────────────────
+/*
+Search Optimization builds a special index-like structure for point lookups
+(WHERE col = 'specific_value'). Use for:
+  • Looking up a single order by ID in a billion-row table
+  • Finding a specific user by email
+  • Any query that filters to a tiny fraction of rows by equality/IN
+*/
+
+ALTER TABLE my_project_db.raw.orders ADD SEARCH OPTIMIZATION
+    ON EQUALITY(order_id, customer_id);
+-- Now: WHERE order_id = 'ORD12345' on a 1B row table → near-instant!
+
+-- Check if it's helping
+SELECT * FROM TABLE(INFORMATION_SCHEMA.SEARCH_OPTIMIZATION_HISTORY(
+    DATE_RANGE_START => DATEADD('DAY', -7, CURRENT_TIMESTAMP())
+));
+
+-- ─────────────────────────────────────────────────
+-- Query Profile Tips
+-- ─────────────────────────────────────────────────
+/*
+When a query is slow, check the Query Profile in the Snowsight UI:
+
+RED FLAGS TO LOOK FOR:
+  • Spilling to local/remote disk: Warehouse too small for the data volume
+    → FIX: Use a larger warehouse or reduce data with early filters
+  • Exploding joins: Join produces way more rows than expected
+    → FIX: Check join keys for duplicates (many-to-many)
+  • Full table scan: No partition pruning
+    → FIX: Add a WHERE clause on a clustered column
+  • Large sorts: ORDER BY on huge result sets
+    → FIX: Add LIMIT or filter earlier in the query
+*/
+
+-- Find expensive queries from the last 24 hours
+SELECT
+    query_id,
+    query_text,
+    warehouse_name,
+    total_elapsed_time / 1000 AS seconds,
+    bytes_scanned / 1024 / 1024 / 1024 AS gb_scanned,
+    partitions_total,
+    partitions_scanned,
+    ROUND(partitions_scanned / NULLIF(partitions_total, 0) * 100, 1) AS pct_scanned
+FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY(
+    DATEADD('DAY', -1, CURRENT_TIMESTAMP()), CURRENT_TIMESTAMP()
+))
+WHERE total_elapsed_time > 30000  -- queries over 30 seconds
+ORDER BY total_elapsed_time DESC
+LIMIT 20;
+
+
+-- ============================================================================
+-- 9. TIME TRAVEL & FAIL-SAFE
+-- ============================================================================
+/*
+One of Snowflake's most powerful features. Because micro-partitions are
+IMMUTABLE (never modified in place), Snowflake keeps old versions around.
+
+═══ TIME TRAVEL ═══
+
+  WHAT: Access your data as it existed at ANY point within the retention period.
+  HOW:  Old micro-partitions are kept (not garbage-collected) during retention.
+
+  RETENTION PERIODS:
+    Edition    | Permanent Tables | Transient/Temporary
+    -----------|------------------|--------------------------
+    Standard   | 0-1 day          | 0-1 day
+    Enterprise | 0-90 days        | 0-1 day
+
+  USE CASES:
+    • Undo an accidental DELETE or UPDATE ("oops, I deleted production data!")
+    • Compare current data with historical snapshots
+    • Audit trail: see what data looked like at a specific time
+    • Restore dropped tables (UNDROP)
+
+═══ FAIL-SAFE ═══
+
+  WHAT: 7 additional days of data protection AFTER Time Travel expires.
+  WHO:  ONLY Snowflake support can recover from Fail-safe (not you!).
+  WHEN: Your Time Travel expired AND you realize you need old data.
+  COST: Storage cost for fail-safe period (permanent tables only).
+
+  TIMELINE EXAMPLE (Enterprise, 30-day retention):
+    Day 0: Data written
+    Day 0-30: YOU can access via Time Travel (AT/BEFORE clause)
+    Day 30-37: Only Snowflake support can recover (Fail-safe)
+    Day 37+: Data is gone forever
+*/
+
+-- ─────────────────────────────────────────────────
+-- Querying Historical Data
+-- ─────────────────────────────────────────────────
+
+-- At a specific timestamp: "What did this table look like at noon on July 1st?"
+SELECT * FROM my_project_db.raw.orders
+    AT(TIMESTAMP => '2025-07-01 12:00:00'::TIMESTAMP_NTZ);
+
+-- At a time offset: "What did the table look like 1 hour ago?"
+SELECT * FROM my_project_db.raw.orders
+    AT(OFFSET => -3600);  -- offset in seconds (negative = past)
+
+-- Before a specific query: "Show me data before that bad UPDATE ran"
+SELECT * FROM my_project_db.raw.orders
+    BEFORE(STATEMENT => '01b39e4f-0001-8b9e-0000-0001234abcde');
+-- Get query_id from QUERY_HISTORY or from the Snowsight query results page
+
+-- PRACTICAL EXAMPLE: "I accidentally deleted all 'pending' orders!"
+-- Step 1: Find what was deleted
+SELECT * FROM my_project_db.raw.orders AT(OFFSET => -300)  -- 5 min ago
+WHERE status = 'pending'
+MINUS
+SELECT * FROM my_project_db.raw.orders
+WHERE status = 'pending';
+-- This shows rows that existed 5 min ago but don't exist now
+
+-- Step 2: Restore them
+INSERT INTO my_project_db.raw.orders
+SELECT * FROM my_project_db.raw.orders AT(OFFSET => -300)
+WHERE status = 'pending'
+  AND order_id NOT IN (SELECT order_id FROM my_project_db.raw.orders);
+
+-- ─────────────────────────────────────────────────
+-- Restore Dropped Objects
+-- ─────────────────────────────────────────────────
+
+-- Accidentally dropped a table? No problem!
+DROP TABLE my_project_db.raw.orders;
+UNDROP TABLE my_project_db.raw.orders;  -- fully restored!
+
+-- Works for schemas and databases too:
+DROP SCHEMA my_project_db.staging;
+UNDROP SCHEMA my_project_db.staging;
+
+DROP DATABASE my_project_db;
+UNDROP DATABASE my_project_db;
+
+-- ─────────────────────────────────────────────────
+-- Clone from a Point in Time (backup before risky changes)
+-- ─────────────────────────────────────────────────
+
+-- "I'm about to run a big UPDATE. Let me backup first."
+CREATE TABLE my_project_db.raw.orders_backup
+    CLONE my_project_db.raw.orders
+    AT(TIMESTAMP => CURRENT_TIMESTAMP());
+-- If the UPDATE goes wrong → DROP orders, ALTER orders_backup RENAME TO orders
+
+-- Set retention period
+ALTER TABLE my_project_db.raw.orders SET DATA_RETENTION_TIME_IN_DAYS = 30;
+-- Now you can Time Travel up to 30 days back on this table
+
+
+-- ============================================================================
+-- 10. STREAMS & TASKS (Change Data Capture & Automation)
+-- ============================================================================
+/*
+Streams and Tasks together let you build automated ELT pipelines entirely
+within Snowflake — no external orchestrator (Airflow, etc.) needed for
+simple pipelines.
+
+═══ STREAMS: Change Data Capture (CDC) ═══
+
+  WHAT: A stream "watches" a table and records all changes (insert/update/delete)
+        that happen after the stream was created.
+
+  HOW IT WORKS:
+    1. You create a stream on a table
+    2. Any INSERT/UPDATE/DELETE on that table is recorded in the stream
+    3. When you read (consume) the stream in a DML statement, it advances
+    4. The stream then only shows CHANGES since last consumption
+
+  STREAM COLUMNS (added automatically):
+    METADATA$ACTION    — 'INSERT' or 'DELETE'
+    METADATA$ISUPDATE  — TRUE if this INSERT+DELETE pair represents an UPDATE
+    METADATA$ROW_ID    — unique ID for the row
+
+  HOW UPDATES APPEAR:
+    An UPDATE on one row shows as TWO rows in the stream:
+      1. DELETE of old values (METADATA$ACTION='DELETE', METADATA$ISUPDATE=TRUE)
+      2. INSERT of new values (METADATA$ACTION='INSERT', METADATA$ISUPDATE=TRUE)
+
+═══ TASKS: Scheduled Execution ═══
+
+  WHAT: A task runs a SQL statement on a schedule (cron or interval).
+  TRIGGER: Schedule-based OR stream-based (only runs when stream has data).
+  COMPUTE: Uses a warehouse OR serverless compute (managed by Snowflake).
+
+  TASK DAGs: Tasks can be chained — child tasks run after parent completes.
+*/
+
+-- ─────────────────────────────────────────────────
+-- Creating a Stream
+-- ─────────────────────────────────────────────────
+
+-- Standard stream: captures INSERT, UPDATE, DELETE
+CREATE STREAM my_project_db.raw.orders_stream
+    ON TABLE my_project_db.raw.orders
+    SHOW_INITIAL_ROWS = FALSE       -- don't capture existing rows as "inserts"
+    APPEND_ONLY = FALSE;            -- capture all change types
+
+-- Append-only stream: captures ONLY inserts (more efficient, lower overhead)
+-- Use when you know the source table only gets new rows (never updated)
+CREATE STREAM my_project_db.raw.events_stream
+    ON TABLE my_project_db.raw.events
+    APPEND_ONLY = TRUE;
+
+-- Check what changes are pending in the stream
+SELECT
+    order_id,
+    status,
+    total_amount,
+    METADATA$ACTION AS change_type,      -- INSERT or DELETE
+    METADATA$ISUPDATE AS is_update,      -- TRUE = part of an UPDATE
+    METADATA$ROW_ID AS row_id
+FROM my_project_db.raw.orders_stream;
+
+-- IMPORTANT: Reading a stream in a SELECT does NOT consume it!
+-- Only DML (INSERT, MERGE, etc.) that references the stream consumes it.
+-- After consumption, the stream resets and only shows new changes.
+
+-- Check if stream has any data (useful for task triggers)
+SELECT SYSTEM$STREAM_HAS_DATA('my_project_db.raw.orders_stream');
+-- Returns TRUE or FALSE
+
+-- ─────────────────────────────────────────────────
+-- Creating Tasks
+-- ─────────────────────────────────────────────────
+
+-- Task with CRON schedule (runs every hour)
+CREATE TASK my_project_db.staging.process_new_orders
+    WAREHOUSE = 'ANALYTICS_WH'
+    SCHEDULE = 'USING CRON 0 */1 * * * UTC'  -- minute hour day month weekday
+    -- CRON examples:
+    --   '0 */1 * * * UTC'    = every hour at :00
+    --   '0 6 * * * UTC'      = daily at 6 AM UTC
+    --   '0 0 * * MON UTC'    = every Monday at midnight
+    --   '*/5 * * * * UTC'    = every 5 minutes
+    WHEN SYSTEM$STREAM_HAS_DATA('my_project_db.raw.orders_stream')
+    -- ^ Only runs if the stream has new data (saves compute cost!)
+AS
+    MERGE INTO my_project_db.staging.stg_orders t
+    USING (
+        -- Get latest version of each order from stream
+        SELECT * FROM my_project_db.raw.orders_stream
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY order_date DESC) = 1
+    ) s
+        ON t.order_id = s.order_id
+    WHEN MATCHED AND s.METADATA$ACTION = 'INSERT' AND s.METADATA$ISUPDATE = TRUE THEN
+        UPDATE SET
+            t.status = s.status,
+            t.total_amount = s.total_amount,
+            t.loaded_at = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED AND s.METADATA$ACTION = 'INSERT' THEN
+        INSERT (order_id, customer_id, order_date, status, total_amount, loaded_at)
+        VALUES (s.order_id, s.customer_id, s.order_date, s.status,
+                s.total_amount, CURRENT_TIMESTAMP());
+
+-- IMPORTANT: Tasks are created in SUSPENDED state! Must resume:
+ALTER TASK my_project_db.staging.process_new_orders RESUME;
+
+-- ─────────────────────────────────────────────────
+-- Task Trees (DAGs) — chain tasks together
+-- ─────────────────────────────────────────────────
+/*
+You can create parent → child task relationships. Child tasks run
+automatically after the parent completes successfully.
+
+  process_new_orders (parent — runs on schedule)
+    ├── update_customer_metrics (child — runs after parent)
+    └── update_daily_summary (child — runs after parent, in parallel)
+*/
+
+CREATE TASK my_project_db.analytics.update_customer_metrics
+    WAREHOUSE = 'ANALYTICS_WH'
+    AFTER my_project_db.staging.process_new_orders    -- triggered by parent
+AS
+    MERGE INTO my_project_db.analytics.customer_metrics t
+    USING (
+        SELECT
+            customer_id,
+            COUNT(*) AS total_orders,
+            SUM(total_amount) AS total_spent,
+            MAX(order_date) AS last_order_date
+        FROM my_project_db.staging.stg_orders
+        GROUP BY 1
+    ) s ON t.customer_id = s.customer_id
+    WHEN MATCHED THEN UPDATE SET
+        t.total_orders = s.total_orders,
+        t.total_spent = s.total_spent,
+        t.last_order_date = s.last_order_date
+    WHEN NOT MATCHED THEN INSERT VALUES
+        (s.customer_id, s.total_orders, s.total_spent, s.last_order_date);
+
+-- IMPORTANT: For task trees, resume children FIRST, then parent!
+ALTER TASK my_project_db.analytics.update_customer_metrics RESUME;
+ALTER TASK my_project_db.staging.process_new_orders RESUME;
+
+-- Monitor task execution history
+SELECT
+    name,
+    state,
+    scheduled_time,
+    completed_time,
+    error_message
+FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
+    SCHEDULED_TIME_RANGE_START => DATEADD('HOUR', -24, CURRENT_TIMESTAMP()),
+    RESULT_LIMIT => 50
+))
+ORDER BY scheduled_time DESC;
+
+-- Serverless task (Snowflake manages compute — no warehouse needed)
+-- Simpler and often cheaper for small/infrequent tasks
+CREATE TASK my_project_db.staging.lightweight_task
+    USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'XSMALL'  -- serverless!
+    SCHEDULE = '60 MINUTE'  -- alternative to CRON: run every 60 minutes
+AS
+    DELETE FROM my_project_db.staging.stg_orders WHERE loaded_at < DATEADD('DAY', -7, CURRENT_TIMESTAMP());
+
+
+-- ============================================================================
+-- 11. DYNAMIC TABLES (Declarative Pipelines - Modern Approach)
+-- ============================================================================
+/*
+Dynamic Tables are Snowflake's answer to complex Stream+Task pipelines.
+Instead of writing imperative logic (HOW to process data), you write
+declarative logic (WHAT the result should look like) and Snowflake figures
+out how and when to refresh it.
+
+═══ HOW THEY WORK ═══
+
+  1. You write a SELECT query defining the result you want
+  2. You set a TARGET_LAG (freshness guarantee): e.g., '1 hour'
+  3. Snowflake automatically:
+     - Detects changes in source tables
+     - Determines if incremental or full refresh is needed
+     - Schedules refreshes to meet your TARGET_LAG guarantee
+
+═══ DYNAMIC TABLES vs. STREAM+TASK ═══
+
+  Stream+Task:
+    + Full control over exactly how data is processed
+    + Better for complex procedural logic
+    - More code to write and maintain
+    - You manage error handling, retries, ordering
+
+  Dynamic Tables:
+    + Declarative: just describe the result
+    + Automatic incremental refresh when possible
+    + Chain them together (downstream tables refresh automatically)
+    + Less code, less maintenance
+    - Less control over timing/execution
+    - Some SQL features not supported (e.g., non-deterministic functions)
+
+═══ TARGET_LAG OPTIONS ═══
+
+  '1 minute'    — data is at most 1 minute behind source
+  '1 hour'      — data is at most 1 hour behind (common for analytics)
+  '1 day'       — daily freshness (cheapest)
+  'DOWNSTREAM'  — refresh only when a downstream table needs it
+*/
+
+-- ─────────────────────────────────────────────────
+-- Example: Customer Metrics Dynamic Table
+-- ─────────────────────────────────────────────────
+
+CREATE OR REPLACE DYNAMIC TABLE my_project_db.analytics.dt_customer_metrics
+    TARGET_LAG = '1 hour'           -- guarantee: max 1 hour behind source
+    WAREHOUSE = analytics_wh        -- uses this warehouse for refresh computation
+AS
+    SELECT
+        c.customer_id,
+        c.customer_city,
+        c.customer_state,
+        COUNT(DISTINCT o.order_id) AS total_orders,
+        SUM(oi.price) AS total_spent,
+        AVG(oi.price) AS avg_order_value,
+        MIN(o.order_purchase_timestamp) AS first_order,
+        MAX(o.order_purchase_timestamp) AS last_order,
+        DATEDIFF('day',
+            MIN(o.order_purchase_timestamp),
+            MAX(o.order_purchase_timestamp)
+        ) AS customer_tenure_days
+    FROM my_project_db.raw.raw_customers c
+    LEFT JOIN my_project_db.raw.raw_orders o ON c.customer_id = o.customer_id
+    LEFT JOIN my_project_db.raw.raw_order_items oi ON o.order_id = oi.order_id
+    GROUP BY 1, 2, 3;
+-- That's it! Snowflake will automatically keep this table fresh.
+-- When new orders come into raw.raw_orders, this table updates within 1 hour.
+
+-- ─────────────────────────────────────────────────
+-- Chaining Dynamic Tables (multi-layer pipeline)
+-- ─────────────────────────────────────────────────
+
+-- Layer 1: Clean raw data
+CREATE OR REPLACE DYNAMIC TABLE my_project_db.staging.dt_clean_orders
+    TARGET_LAG = '30 minutes'
+    WAREHOUSE = analytics_wh
+AS
+    SELECT
+        order_id,
+        customer_id,
+        order_purchase_timestamp::DATE AS order_date,
+        UPPER(TRIM(order_status)) AS status,
+        CASE WHEN order_status IN ('delivered', 'shipped') THEN TRUE ELSE FALSE END AS is_completed
+    FROM my_project_db.raw.raw_orders
+    WHERE order_id IS NOT NULL;  -- basic data quality filter
+
+-- Layer 2: Aggregate (references Layer 1 — auto-chains!)
+CREATE OR REPLACE DYNAMIC TABLE my_project_db.analytics.dt_daily_summary
+    TARGET_LAG = 'DOWNSTREAM'  -- refreshes only when something downstream needs it
+    WAREHOUSE = analytics_wh
+AS
+    SELECT
+        order_date,
+        status,
+        COUNT(*) AS order_count,
+        COUNT(DISTINCT customer_id) AS unique_customers
+    FROM my_project_db.staging.dt_clean_orders
+    GROUP BY 1, 2;
+-- Snowflake automatically detects the dependency chain:
+-- raw.raw_orders → dt_clean_orders → dt_daily_summary
+-- Changes flow through automatically!
+
+-- Check refresh history
+SELECT
+    name,
+    refresh_start_time,
+    refresh_end_time,
+    refresh_action,          -- INCREMENTAL or FULL
+    state                    -- SUCCEEDED, FAILED, etc.
+FROM TABLE(INFORMATION_SCHEMA.DYNAMIC_TABLE_REFRESH_HISTORY())
+WHERE NAME = 'DT_CUSTOMER_METRICS'
+ORDER BY REFRESH_START_TIME DESC
+LIMIT 10;
+
+-- Manual refresh (force immediate refresh, don't wait for schedule)
+ALTER DYNAMIC TABLE my_project_db.analytics.dt_customer_metrics REFRESH;
+
+
+-- ============================================================================
+-- 12. DATA SHARING & MARKETPLACE
+-- ============================================================================
+/*
+═══ SECURE DATA SHARING ═══
+
+Snowflake's data sharing is unique: it shares LIVE data without copying.
+The consumer account reads directly from the provider's storage layer.
+
+HOW IT WORKS:
+  Provider Account                    Consumer Account
+  ─────────────────                   ────────────────
+  1. Creates a SHARE object           4. Creates a database FROM the share
+  2. Grants access to specific        5. Queries shared data with their
+     tables/views                        own warehouse (their own compute)
+  3. Adds consumer account(s)         6. Always sees CURRENT data (live!)
+
+KEY POINTS:
+  • NO data copying — consumer reads provider's storage directly
+  • Provider pays for storage, Consumer pays for their own compute
+  • Data is always current (no sync delay, no ETL)
+  • Provider can revoke access anytime
+  • Secure views are required (hide underlying table structure)
+
+═══ MARKETPLACE ═══
+
+  The Snowflake Marketplace has 2000+ free & paid data products:
+  • Weather data (for supply chain analytics)
+  • Financial data (stock prices, economic indicators)
+  • Demographic data (census, consumer behavior)
+  • COVID data, geo data, industry benchmarks...
+
+  Getting marketplace data:
+  1. Browse marketplace in Snowsight UI
+  2. Click "Get" on a listing
+  3. A shared database appears in your account instantly
+  4. Query it like any other database (it's just a database!)
+*/
+
+-- ─────────────────────────────────────────────────
+-- Creating a Share (Provider side)
+-- ─────────────────────────────────────────────────
+
+-- Step 1: Create the share object
+CREATE SHARE my_data_share
+    COMMENT = 'Sharing daily revenue metrics with partner accounts';
+
+-- Step 2: Grant access to the objects you want to share
+GRANT USAGE ON DATABASE my_project_db TO SHARE my_data_share;
+GRANT USAGE ON SCHEMA my_project_db.analytics TO SHARE my_data_share;
+GRANT SELECT ON TABLE my_project_db.analytics.mv_daily_revenue TO SHARE my_data_share;
+-- You can share: tables, secure views, secure UDFs
+-- You CANNOT share: regular views (must be SECURE), stages, tasks
+
+-- Step 3: Add consumer accounts
+ALTER SHARE my_data_share ADD ACCOUNTS = 'ORG1.CONSUMER_ACCT';
+
+-- Step 4: On the consumer side (they run this):
+-- CREATE DATABASE shared_revenue FROM SHARE provider_org.provider_acct.my_data_share;
+-- SELECT * FROM shared_revenue.analytics.mv_daily_revenue;
+
+-- ─────────────────────────────────────────────────
+-- Reader Accounts (for non-Snowflake consumers)
+-- ─────────────────────────────────────────────────
+-- If your partner doesn't have Snowflake, create a Reader Account for them:
+-- They get a limited Snowflake account (you pay for their compute!)
+-- CREATE MANAGED ACCOUNT partner_reader ...
+
+
+-- ============================================================================
+-- 13. SECURITY & RBAC (Role-Based Access Control)
+-- ============================================================================
+/*
+═══ RBAC: THE MENTAL MODEL ═══
+
+In Snowflake, ALL access is controlled through ROLES. Users don't get
+permissions directly — they get ROLES, and roles have PRIVILEGES.
+
+  USER → has ROLE(s) → ROLE has PRIVILEGES on → OBJECTS
+
+═══ BUILT-IN ROLE HIERARCHY ═══
+
+  ACCOUNTADMIN (top — has EVERYTHING. Like root/sudo. NEVER use daily!)
+    ├── SECURITYADMIN (manages users, roles, grants)
+    ├── SYSADMIN (manages warehouses, databases, schemas, tables)
+    │     ├── YOUR_CUSTOM_ROLE_1 (data_engineer)
+    │     │     └── YOUR_CUSTOM_ROLE_2 (data_analyst)
+    │     └── YOUR_CUSTOM_ROLE_3 (data_scientist)
+    └── USERADMIN (can create users and roles, but not grant on objects)
+  PUBLIC (everyone has this automatically — minimal privileges)
+
+BEST PRACTICES:
+  • NEVER use ACCOUNTADMIN for daily work (use a custom role)
+  • Attach all custom roles under SYSADMIN (so SYSADMIN inherits access)
+  • Use FUTURE GRANTS so new objects auto-inherit permissions
+  • Principle of least privilege: grant minimum needed access
+
+═══ KEY PRIVILEGE TYPES ═══
+
+  ON DATABASE:  USAGE (can "enter" the database), MONITOR, CREATE SCHEMA
+  ON SCHEMA:    USAGE (can "enter" the schema), CREATE TABLE/VIEW/etc.
+  ON TABLE:     SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES
+  ON WAREHOUSE: USAGE (can run queries), OPERATE (can resize/suspend)
+*/
+
+-- ─────────────────────────────────────────────────
+-- Setting Up Custom Roles (Real-World Example)
+-- ─────────────────────────────────────────────────
+
+-- Create roles for your team
+CREATE ROLE data_engineer
+    COMMENT = 'Full access to raw/staging schemas, read access to analytics';
+CREATE ROLE data_analyst
+    COMMENT = 'Read-only access to analytics schema';
+CREATE ROLE data_scientist
+    COMMENT = 'Read access to all schemas + ability to create temporary tables';
+
+-- Build the hierarchy (custom roles sit under SYSADMIN)
+GRANT ROLE data_engineer TO ROLE SYSADMIN;     -- SYSADMIN inherits engineer access
+GRANT ROLE data_analyst TO ROLE data_engineer;  -- engineer inherits analyst access
+GRANT ROLE data_scientist TO ROLE SYSADMIN;
+
+-- Grant to users
+GRANT ROLE data_analyst TO USER aayush_misra;
+-- Now user 'aayush_misra' can switch to this role: USE ROLE data_analyst;
+
+-- ─────────────────────────────────────────────────
+-- Granting Privileges
+-- ─────────────────────────────────────────────────
+
+-- Data analyst: read-only access to analytics
+GRANT USAGE ON DATABASE my_project_db TO ROLE data_analyst;
+GRANT USAGE ON SCHEMA my_project_db.analytics TO ROLE data_analyst;
+GRANT SELECT ON ALL TABLES IN SCHEMA my_project_db.analytics TO ROLE data_analyst;
+GRANT SELECT ON ALL VIEWS IN SCHEMA my_project_db.analytics TO ROLE data_analyst;
+
+-- FUTURE GRANTS: auto-apply to tables/views created in the future!
+GRANT SELECT ON FUTURE TABLES IN SCHEMA my_project_db.analytics TO ROLE data_analyst;
+GRANT SELECT ON FUTURE VIEWS IN SCHEMA my_project_db.analytics TO ROLE data_analyst;
+-- Without FUTURE GRANTS: every new table needs manual GRANT (easy to forget!)
+
+-- Grant warehouse usage (needed to actually run queries)
+GRANT USAGE ON WAREHOUSE analytics_wh TO ROLE data_analyst;
+
+-- Data engineer: full access to raw and staging
+GRANT ALL PRIVILEGES ON SCHEMA my_project_db.raw TO ROLE data_engineer;
+GRANT ALL PRIVILEGES ON SCHEMA my_project_db.staging TO ROLE data_engineer;
+GRANT ALL PRIVILEGES ON FUTURE TABLES IN SCHEMA my_project_db.raw TO ROLE data_engineer;
+
+-- ─────────────────────────────────────────────────
+-- Data Masking Policy (hide sensitive data from unauthorized roles)
+-- ─────────────────────────────────────────────────
+/*
+Masking policies dynamically mask column values based on WHO is querying.
+The data_engineer sees full email; the data_analyst sees '***@domain.com'.
+*/
+
+CREATE MASKING POLICY mask_email AS (val STRING)
+RETURNS STRING ->
+    CASE
+        WHEN CURRENT_ROLE() IN ('DATA_ENGINEER', 'ACCOUNTADMIN') THEN val
+        ELSE REGEXP_REPLACE(val, '.+@', '***@')
+        -- 'aayush@company.com' → '***@company.com'
+    END;
+
+-- Apply to a column
+ALTER TABLE my_project_db.raw.customers
+    MODIFY COLUMN email SET MASKING POLICY mask_email;
+
+-- Now:
+-- As DATA_ENGINEER: SELECT email FROM customers → 'aayush@company.com'
+-- As DATA_ANALYST:  SELECT email FROM customers → '***@company.com'
+-- The data is NEVER actually modified — masking happens at query time!
+
+-- Another example: mask phone numbers
+CREATE MASKING POLICY mask_phone AS (val STRING)
+RETURNS STRING ->
+    CASE
+        WHEN CURRENT_ROLE() IN ('DATA_ENGINEER', 'ACCOUNTADMIN') THEN val
+        ELSE CONCAT('XXX-XXX-', RIGHT(val, 4))
+        -- '555-123-4567' → 'XXX-XXX-4567'
+    END;
+
+-- ─────────────────────────────────────────────────
+-- Row Access Policy (row-level security)
+-- ─────────────────────────────────────────────────
+/*
+Row Access Policies filter WHICH ROWS a user can see, based on their role
+or attributes. Like an invisible WHERE clause applied automatically.
+*/
+
+CREATE ROW ACCESS POLICY region_filter AS (region_val VARCHAR)
+RETURNS BOOLEAN ->
+    CURRENT_ROLE() = 'ACCOUNTADMIN'        -- admins see everything
+    OR CURRENT_ROLE() = 'DATA_ENGINEER'    -- engineers see everything
+    OR region_val IN (
+        SELECT region FROM role_region_mapping
+        WHERE role_name = CURRENT_ROLE()
+    );
+    -- Analysts only see rows for their assigned region
+
+-- Apply to table
+ALTER TABLE my_project_db.raw.orders
+    ADD ROW ACCESS POLICY region_filter ON (region);
+-- Now a West Coast analyst only sees orders WHERE region = 'west'
+
+
+-- ============================================================================
+-- 14. SNOWPARK (Python/Java/Scala in Snowflake)
+-- ============================================================================
+/*
+═══ WHAT IS SNOWPARK? ═══
+
+Snowpark lets you write Python, Java, or Scala code that runs INSIDE
+Snowflake's compute layer. Your code gets translated to Snowflake's
+execution engine — data never leaves Snowflake!
+
+═══ WHY USE SNOWPARK? ═══
+
+  • Complex transformations that are hard to express in SQL
+  • ML feature engineering with Python libraries (pandas, scikit-learn)
+  • Custom business logic that requires procedural code
+  • Integrate with Python data science ecosystem
+
+═══ KEY CONCEPTS ═══
+
+  DataFrame API:  Like Pandas but lazy — operations build a query plan,
+                  execution happens on Snowflake's compute when you collect()
+  UDF:            User Defined Function — custom function callable from SQL
+  Stored Proc:    Procedural code that can execute multiple SQL statements
+
+═══ WHERE CODE RUNS ═══
+
+  Your Python code → Snowflake translates to execution plan → Runs on
+  your warehouse (same compute as SQL) → Results stay in Snowflake
+
+  IMPORTANT: Data NEVER leaves Snowflake. No data transfer to your laptop.
+*/
+
+-- ─────────────────────────────────────────────────
+-- Python UDF (callable from SQL like a built-in function)
+-- ─────────────────────────────────────────────────
+
+-- Example: Calculate discount based on product category
+CREATE OR REPLACE FUNCTION calculate_discount(price FLOAT, category VARCHAR)
+RETURNS FLOAT
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.11'
+HANDLER = 'calc'
+AS $$
+def calc(price, category):
+    """Apply category-specific discount rates."""
+    rates = {
+        'electronics': 0.10,   # 10% off electronics
+        'clothing': 0.20,      # 20% off clothing
+        'food': 0.05,          # 5% off food
+        'books': 0.15          # 15% off books
+    }
+    discount_rate = rates.get(category.lower(), 0.0)
+    return round(price * discount_rate, 2)
+$$;
+
+-- Use it in SQL just like any built-in function:
+SELECT
+    product_name,
+    price,
+    category,
+    calculate_discount(price, category) AS discount_amount,
+    price - calculate_discount(price, category) AS final_price
+FROM my_project_db.raw.products;
+-- Runs on the warehouse, processes millions of rows, no data leaves Snowflake!
+
+-- ─────────────────────────────────────────────────
+-- Python UDTF (User Defined TABLE Function — returns multiple rows)
+-- ─────────────────────────────────────────────────
+
+-- Example: Split a comma-separated string into rows
+CREATE OR REPLACE FUNCTION split_tags(tags STRING)
+RETURNS TABLE(tag STRING, position INT)
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.11'
+HANDLER = 'SplitTags'
+AS $$
+class SplitTags:
+    def process(self, tags):
+        if tags:
+            for i, tag in enumerate(tags.split(',')):
+                yield (tag.strip(), i)
+$$;
+
+-- Use it (TABLE function called with TABLE() syntax):
+SELECT order_id, t.tag, t.position
+FROM my_project_db.raw.orders,
+    TABLE(split_tags(metadata:tags::STRING)) t;
+
+-- ─────────────────────────────────────────────────
+-- Python Stored Procedure (multi-step data processing)
+-- ─────────────────────────────────────────────────
+
+CREATE OR REPLACE PROCEDURE process_daily_data()
+RETURNS STRING
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.11'
+PACKAGES = ('snowflake-snowpark-python', 'pandas')
+HANDLER = 'main'
+AS $$
+import snowflake.snowpark as snowpark
+from snowflake.snowpark.functions import col, sum as sf_sum, count, avg
+
+def main(session):
+    """
+    Process raw orders into summary analytics.
+    Demonstrates Snowpark DataFrame API.
+    """
+    # Read source table (lazy — no data loaded yet!)
+    orders_df = session.table('my_project_db.raw.orders')
+
+    # Filter and transform (still lazy — building query plan)
+    delivered = orders_df.filter(col('status') == 'delivered')
+
+    # Aggregate (like GROUP BY in SQL)
+    summary = delivered.group_by('status').agg(
+        count('*').alias('total_orders'),
+        sf_sum('total_amount').alias('total_revenue'),
+        avg('total_amount').alias('avg_order_value')
+    )
+
+    # Write results (THIS triggers execution on the warehouse!)
+    summary.write.save_as_table(
+        'my_project_db.analytics.order_status_summary',
+        mode='overwrite'  # truncate + insert
+    )
+
+    row_count = summary.count()
+    return f'Success! Wrote {row_count} rows to analytics.order_status_summary'
+$$;
+
+-- Execute the stored procedure
+CALL process_daily_data();
+-- Output: 'Success! Wrote 3 rows to analytics.order_status_summary'
+
+
+-- ============================================================================
+-- 15. CORTEX AI & ML FUNCTIONS
+-- ============================================================================
+/*
+═══ SNOWFLAKE CORTEX: AI/ML Without Infrastructure ═══
+
+Cortex provides ready-to-use AI/ML capabilities directly in SQL.
+No model training, no GPU setup, no Python environment. Just SQL!
+
+═══ LLM FUNCTIONS (Large Language Models) ═══
+
+  COMPLETE()        — generate text, answer questions, analyze content
+  SUMMARIZE()       — condense long text into key points
+  TRANSLATE()       — translate between languages
+  SENTIMENT()       — score text -1 (negative) to +1 (positive)
+  EXTRACT_ANSWER()  — extract specific answers from text passages
+
+═══ ML FUNCTIONS (Traditional ML) ═══
+
+  FORECAST()            — time series prediction (next N periods)
+  ANOMALY_DETECTION()   — detect outliers in time series data
+  CLASSIFICATION()      — categorize data (train + predict)
+
+═══ VECTOR FUNCTIONS (Semantic/AI Search) ═══
+
+  EMBED_TEXT_768()  — convert text to 768-dimensional vector embedding
+  VECTOR_L2_DISTANCE() — find similar vectors (semantic search)
+
+═══ AVAILABLE MODELS (for COMPLETE) ═══
+  mistral-large2, llama3.1-70b, llama3.1-8b, mixtral-8x7b, etc.
+  Different models have different speed/quality/cost tradeoffs.
+*/
+
+-- ─────────────────────────────────────────────────
+-- Sentiment Analysis
+-- ─────────────────────────────────────────────────
+-- Score ranges from -1 (very negative) to +1 (very positive)
+
+SELECT
+    review_comment,
+    SNOWFLAKE.CORTEX.SENTIMENT(review_comment) AS sentiment_score,
+    CASE
+        WHEN SNOWFLAKE.CORTEX.SENTIMENT(review_comment) > 0.3 THEN 'Positive'
+        WHEN SNOWFLAKE.CORTEX.SENTIMENT(review_comment) < -0.3 THEN 'Negative'
+        ELSE 'Neutral'
+    END AS sentiment_label
+FROM my_project_db.raw.raw_order_reviews
+WHERE review_comment IS NOT NULL
+LIMIT 10;
+-- Example outputs:
+--   "Great product, fast shipping!" → 0.85 → Positive
+--   "Arrived broken, terrible quality" → -0.72 → Negative
+--   "It's okay, does the job" → 0.1 → Neutral
+
+-- ─────────────────────────────────────────────────
+-- Summarize Text
+-- ─────────────────────────────────────────────────
+
+SELECT
+    review_comment,
+    SNOWFLAKE.CORTEX.SUMMARIZE(review_comment) AS summary
+FROM my_project_db.raw.raw_order_reviews
+WHERE LENGTH(review_comment) > 200  -- only summarize long reviews
+LIMIT 5;
+-- Takes a 500-word review → condenses to 2-3 sentences
+
+-- ─────────────────────────────────────────────────
+-- AI Complete (Free-form LLM Generation)
+-- ─────────────────────────────────────────────────
+-- This is the most flexible function — you provide a prompt, it generates text.
+
+-- Example 1: Analyze customer reviews
+SELECT
+    review_comment,
+    SNOWFLAKE.CORTEX.COMPLETE(
+        'mistral-large2',  -- model name
+        CONCAT(
+            'Analyze this customer review and respond in JSON format with keys: ',
+            'sentiment (positive/negative/neutral), ',
+            'key_issues (array of strings), ',
+            'recommended_action (string). ',
+            'Review: ', review_comment
+        )
+    ) AS ai_analysis
+FROM my_project_db.raw.raw_order_reviews
+WHERE review_comment IS NOT NULL
+LIMIT 3;
+
+-- Example 2: Generate product descriptions
+SELECT
+    product_name,
+    category,
+    SNOWFLAKE.CORTEX.COMPLETE(
+        'mistral-large2',
+        CONCAT('Write a concise 2-sentence product description for: ',
+               product_name, ' in the ', category, ' category.')
+    ) AS generated_description
+FROM my_project_db.raw.products
+LIMIT 5;
+
+-- Example 3: Translate reviews to English
+SELECT
+    review_comment,
+    SNOWFLAKE.CORTEX.TRANSLATE(review_comment, 'pt', 'en') AS english_translation
+FROM my_project_db.raw.raw_order_reviews
+WHERE review_comment IS NOT NULL
+LIMIT 5;
+-- 'pt' = Portuguese, 'en' = English (ISO 639-1 language codes)
+
+-- ─────────────────────────────────────────────────
+-- Time Series Forecasting (ML)
+-- ─────────────────────────────────────────────────
+/*
+FORECAST trains a time series model on historical data and predicts
+future values. Snowflake handles model selection, training, and tuning.
+*/
+
+-- Step 1: Create a forecasting model (trains on historical data)
+CREATE SNOWFLAKE.ML.FORECAST my_forecast_model(
+    INPUT_DATA => SYSTEM$REFERENCE('VIEW', 'my_project_db.analytics.v_daily_revenue'),
+    TIMESTAMP_COLNAME => 'day',          -- the date/time column
+    TARGET_COLNAME => 'revenue'          -- what we want to predict
+);
+-- This trains the model using all historical data in v_daily_revenue.
+-- Snowflake auto-selects the best algorithm, handles seasonality, trends.
+
+-- Step 2: Generate predictions
+CALL my_forecast_model!FORECAST(FORECASTING_PERIODS => 30);
+-- Returns: day (future dates), forecast (predicted revenue),
+--          lower_bound, upper_bound (confidence interval)
+
+-- Step 3: Use predictions in a query
+SELECT
+    ts AS future_date,
+    forecast AS predicted_revenue,
+    lower_bound,
+    upper_bound
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+ORDER BY ts;
+
+-- ─────────────────────────────────────────────────
+-- Anomaly Detection (ML)
+-- ─────────────────────────────────────────────────
+
+-- Detect unusual patterns in your metrics
+CREATE SNOWFLAKE.ML.ANOMALY_DETECTION my_anomaly_model(
+    INPUT_DATA => SYSTEM$REFERENCE('VIEW', 'my_project_db.analytics.v_daily_revenue'),
+    TIMESTAMP_COLNAME => 'day',
+    TARGET_COLNAME => 'revenue',
+    LABEL_COLNAME => ''  -- unsupervised (no labels needed)
+);
+
+-- Check for anomalies in recent data
+CALL my_anomaly_model!DETECT_ANOMALIES(
+    INPUT_DATA => SYSTEM$REFERENCE('VIEW', 'my_project_db.analytics.v_daily_revenue'),
+    TIMESTAMP_COLNAME => 'day',
+    TARGET_COLNAME => 'revenue'
+);
+-- Returns: is_anomaly (TRUE/FALSE), anomaly_score, expected_value
+
+
+-- ============================================================================
+-- 16. COST MANAGEMENT
+-- ============================================================================
+/*
+═══ UNDERSTANDING SNOWFLAKE COSTS ═══
+
+  COMPONENT         | HOW IT'S CHARGED            | TYPICAL COST
+  ──────────────────|─────────────────────────────|──────────────────
+  Compute           | Credits × $/credit          | $2-4/credit
+  Storage           | TB/month                    | $23/TB (on-demand)
+  Data Transfer     | Per GB cross-region         | $0.02-0.05/GB
+  Serverless        | Credits (Snowpipe, etc.)    | Varies
+
+  CREDIT COST PER HOUR by warehouse size:
+    XS = 1 credit    S = 2 credits    M = 4 credits     L = 8 credits
+    XL = 16 credits  2XL = 32         3XL = 64          4XL = 128
+
+  REAL EXAMPLE: A Small warehouse running 8 hours/day for 30 days:
+    2 credits/hr × 8 hrs × 30 days = 480 credits × $3/credit = $1,440/month
+
+═══ WHERE MONEY IS WASTED (TOP COST KILLERS) ═══
+
+  1. Warehouses left running idle (forgot AUTO_SUSPEND)
+  2. Oversized warehouses (using XL when Small would work)
+  3. Redundant queries (no result cache hit due to slight query differences)
+  4. Bad queries (full table scans, cartesian joins, spilling to disk)
+  5. Over-aggressive clustering on small tables (maintenance cost > benefit)
+  6. High Time Travel retention on transient/temp data
+*/
+
+-- ─────────────────────────────────────────────────
+-- Resource Monitor (budget cap — auto-suspend when limit hit)
+-- ─────────────────────────────────────────────────
+
+CREATE RESOURCE MONITOR my_monthly_monitor
+    WITH CREDIT_QUOTA = 100             -- maximum 100 credits this period
+    FREQUENCY = 'MONTHLY'              -- reset every month
+    START_TIMESTAMP = IMMEDIATELY       -- start now
+    TRIGGERS
+        ON 50 PERCENT DO NOTIFY         -- email alert at 50%
+        ON 75 PERCENT DO NOTIFY         -- email alert at 75%
+        ON 90 PERCENT DO NOTIFY         -- email alert at 90%
+        ON 100 PERCENT DO SUSPEND;      -- STOP all queries on this warehouse!
+-- SUSPEND_IMMEDIATE also available: kills running queries immediately
+
+-- Attach monitor to a warehouse
+ALTER WAREHOUSE analytics_wh SET RESOURCE_MONITOR = my_monthly_monitor;
+-- Now analytics_wh will auto-suspend when it hits 100 credits in a month
+
+-- ─────────────────────────────────────────────────
+-- Monitor Warehouse Usage (find expensive warehouses)
+-- ─────────────────────────────────────────────────
+
+SELECT
+    WAREHOUSE_NAME,
+    DATE_TRUNC('DAY', START_TIME) AS day,
+    SUM(CREDITS_USED) AS daily_credits,
+    ROUND(SUM(CREDITS_USED) * 3, 2) AS est_daily_cost_usd  -- assuming $3/credit
+FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+WHERE START_TIME >= DATEADD('DAY', -30, CURRENT_TIMESTAMP())
+GROUP BY 1, 2
+ORDER BY daily_credits DESC
+LIMIT 20;
+
+-- ─────────────────────────────────────────────────
+-- Find Expensive Queries (optimize the worst offenders)
+-- ─────────────────────────────────────────────────
+
+SELECT
+    query_id,
+    user_name,
+    warehouse_name,
+    warehouse_size,
+    ROUND(total_elapsed_time / 1000, 1) AS seconds,
+    ROUND(bytes_scanned / 1024/1024/1024, 2) AS gb_scanned,
+    partitions_total,
+    partitions_scanned,
+    ROUND(credits_used_cloud_services, 4) AS credits_used,
+    SUBSTR(query_text, 1, 100) AS query_preview
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE start_time >= DATEADD('DAY', -7, CURRENT_TIMESTAMP())
+  AND total_elapsed_time > 60000  -- queries > 60 seconds
+ORDER BY total_elapsed_time DESC
+LIMIT 20;
+
+-- ─────────────────────────────────────────────────
+-- Storage Costs (find large tables to archive/clean)
+-- ─────────────────────────────────────────────────
+
+SELECT
+    TABLE_CATALOG AS database_name,
+    TABLE_SCHEMA AS schema_name,
+    TABLE_NAME,
+    ROW_COUNT,
+    ROUND(BYTES / 1024/1024/1024, 2) AS size_gb,
+    ROUND(BYTES / 1024/1024/1024/1024 * 23, 2) AS est_monthly_cost_usd,
+    LAST_ALTERED
+FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS
+WHERE TABLE_CATALOG = 'MY_PROJECT_DB'
+  AND DELETED IS NULL
+ORDER BY BYTES DESC
+LIMIT 20;
+
+
+-- ============================================================================
+-- 17. BEST PRACTICES CHECKLIST
+-- ============================================================================
+/*
+═══ DATA ENGINEERING ═══
+
+  ☐ Use 3-layer architecture: RAW → STAGING → ANALYTICS/CORE
+      WHY: Separation of concerns. Raw is your safety net, staging is for
+           cleaning, analytics is business-ready. If a transform breaks,
+           you still have the original data in RAW.
+
+  ☐ RAW = exact copy of source (no transformation)
+      WHY: If source system changes schema, you can re-process from RAW.
+      HOW: COPY INTO with minimal transformation, VARIANT for JSON.
+
+  ☐ STAGING = cleaned, typed, deduplicated
+      WHY: Catch data quality issues here (before they reach analytics).
+      HOW: QUALIFY for dedup, CAST for types, COALESCE for nulls.
+
+  ☐ ANALYTICS = business logic, aggregations, star schema
+      WHY: Optimized for BI tools and ad-hoc queries.
+      HOW: Dynamic tables or views with clear naming conventions.
+
+  ☐ Use VARIANT for semi-structured data ingestion
+      WHY: Load once, figure out schema later. No schema-on-write pain.
+      HOW: Load raw JSON into a single VARIANT column, then flatten.
+
+  ☐ Use MERGE for idempotent loads (safe to re-run)
+      WHY: If a pipeline fails mid-run, you can re-run without duplicates.
+      HOW: MERGE on natural key (order_id, event_id, etc.)
+
+  ☐ Prefer Dynamic Tables over Stream+Task for simple pipelines
+      WHY: Less code, automatic incremental refresh, easier maintenance.
+      WHEN: Stream+Task is better for complex procedural logic.
+
+  ☐ Use CLONE for dev/test environments (zero storage cost until modified)
+      WHY: Full production-like environment for free! No impact on prod.
+      HOW: CREATE DATABASE dev_db CLONE prod_db; — instant!
+
+  ☐ Tag tables with metadata (owner, refresh frequency, SLA)
+      WHY: Governance at scale. Know who to contact when something breaks.
+      HOW: ALTER TABLE SET TAG owner='data_team', sla='1_hour';
+
+═══ PERFORMANCE ═══
+
+  ☐ Filter on clustered/date columns first
+      WHY: Enables partition pruning (skip 99% of data).
+      EXAMPLE: WHERE order_date >= '2025-01-01' first, then other filters.
+
+  ☐ Avoid SELECT * in production queries
+      WHY: Columnar storage means you only read columns you request.
+           SELECT * reads ALL columns → much more data scanned.
+
+  ☐ Use LIMIT during development
+      WHY: Don't scan a billion rows to check query logic.
+
+  ☐ Prefer QUALIFY over subqueries for window function filters
+      WHY: Cleaner code, same performance, fewer CTEs needed.
+
+  ☐ Use approximate functions for exploration (APPROX_COUNT_DISTINCT)
+      WHY: 2-5x faster for large tables, <2% error (fine for exploration).
+
+  ☐ Analyze query profile for spillage and cartesian joins
+      WHY: Spillage = warehouse too small. Cartesian = bad join condition.
+      FIX: Scale up warehouse OR fix the query logic.
+
+═══ SECURITY ═══
+
+  ☐ Never use ACCOUNTADMIN for daily work
+      WHY: Accidental DROP DATABASE is permanent with ACCOUNTADMIN.
+           Custom roles with limited access = blast radius control.
+
+  ☐ Create functional roles (data_engineer, data_analyst)
+      WHY: Roles outlive individual users. When someone leaves, revoke role.
+
+  ☐ Use masking policies for PII
+      WHY: Compliance (GDPR, CCPA). Different teams see different things.
+
+  ☐ Grant on FUTURE objects for new tables
+      WHY: Without this, every new table needs manual GRANT (will be forgotten!).
+
+  ☐ Enable network policies for IP allowlisting
+      WHY: Even with strong passwords, restrict access to known networks.
+
+  ☐ Enable MFA for all users
+      WHY: Passwords get leaked. MFA adds a second barrier.
+
+═══ COST ═══
+
+  ☐ AUTO_SUSPEND = 60 for dev, 120 for production
+      WHY: Every second a warehouse runs idle = wasted money.
+           60s is aggressive (may lose local disk cache), 120s is balanced.
+
+  ☐ Use XS/S warehouses (90% of queries don't need more)
+      WHY: Doubling size = doubling cost. Only scale up for proven slow queries.
+      TEST: Run the same query on XS and S. If time drops 50%, S is worth it.
+
+  ☐ Set resource monitors on all warehouses
+      WHY: Runaway queries or loops can burn thousands of credits overnight.
+           Resource monitors are your safety net.
+
+  ☐ Use transient tables for staging/temp data
+      WHY: No fail-safe storage = ~25% cheaper. Staging data is re-derivable.
+
+  ☐ Review QUERY_HISTORY weekly for expensive queries
+      WHY: Top 10 most expensive queries are often 80% of your bill.
+           Optimizing 10 queries can save thousands per month.
+
+  ☐ Consider serverless tasks for infrequent jobs
+      WHY: Serverless = pay only for seconds used. No warehouse idling between runs.
+           Best for tasks that run < 1 minute every hour.
+*/
+
+
+-- ============================================================================
+-- QUICK REFERENCE: USEFUL SYSTEM FUNCTIONS
+-- ============================================================================
+
+-- Context functions (who am I? where am I?)
+SELECT CURRENT_ACCOUNT();       -- your Snowflake account identifier
+SELECT CURRENT_USER();          -- logged-in username
+SELECT CURRENT_ROLE();          -- active role
+SELECT CURRENT_WAREHOUSE();     -- active warehouse
+SELECT CURRENT_DATABASE();      -- active database context
+SELECT CURRENT_SCHEMA();        -- active schema context
+SELECT CURRENT_SESSION();       -- unique session ID
+SELECT CURRENT_TIMESTAMP();     -- current time (with timezone)
+
+-- Query history (what ran recently?)
+SELECT
+    query_id,
+    query_text,
+    user_name,
+    total_elapsed_time / 1000 AS seconds,
+    rows_produced,
+    execution_status
+FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY(
+    DATEADD('HOUR', -1, CURRENT_TIMESTAMP()), CURRENT_TIMESTAMP()
+))
+ORDER BY START_TIME DESC
+LIMIT 20;
+
+-- Table storage (how big are my tables?)
+SELECT
+    TABLE_NAME,
+    ROW_COUNT,
+    BYTES / 1024 / 1024 AS SIZE_MB,
+    LAST_ALTERED
+FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA = 'RAW'
+ORDER BY BYTES DESC;
+
+-- Active warehouses (what's running right now?)
+SHOW WAREHOUSES;
+
+-- Useful for debugging: what grants does my role have?
+SHOW GRANTS TO ROLE data_analyst;
+
+-- What roles do I have access to?
+SHOW GRANTS TO USER AAYUSHMISRA2028;
+
+
+-- ============================================================================
+-- 18. STORED PROCEDURES & UDFs
+-- ============================================================================
+/*
+═══ KEY DIFFERENCE: PROCEDURE vs FUNCTION ═══
+
+  PROCEDURE (CREATE PROCEDURE)              FUNCTION (CREATE FUNCTION)
+  ──────────────────────────────────        ──────────────────────────────────
+  Called with CALL                           Called inside SQL (SELECT, WHERE)
+  Can execute DDL/DML (CREATE, INSERT...)    READ-ONLY (no side effects)
+  Cannot be used in SELECT                  Can be used in SELECT, WHERE, etc.
+  Can return a table (RETURNS TABLE)        Returns scalar, table, or object
+  Runs with CALLER or OWNER rights          Always runs with CALLER rights
+  Used for: automation, admin tasks         Used for: reusable calculations
+
+  WHEN TO USE WHAT:
+  • Need to INSERT/UPDATE/DELETE? → PROCEDURE
+  • Need to CREATE tables/schemas? → PROCEDURE  
+  • Need a reusable calculation in WHERE clause? → FUNCTION
+  • Need to transform a column in SELECT? → FUNCTION
+*/
+
+-- ─────────────────────────────────────────────────────────
+-- SQL Stored Procedures
+-- ─────────────────────────────────────────────────────────
+
+-- Basic procedure with parameters
+CREATE OR REPLACE PROCEDURE my_project_db.analytics.sp_refresh_daily_summary(
+    p_target_date DATE DEFAULT CURRENT_DATE()  -- optional param with default
+)
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS CALLER  -- runs with the calling user's permissions
+AS
+$$
+BEGIN
+    -- Variables declared with LET (or DECLARE block)
+    LET v_rows_affected INTEGER := 0;
+    LET v_start_time TIMESTAMP := CURRENT_TIMESTAMP();
+
+    -- Delete existing data for the target date (idempotent re-runs)
+    DELETE FROM my_project_db.analytics.daily_summary
+    WHERE summary_date = :p_target_date;
+
+    -- Insert fresh aggregation
+    INSERT INTO my_project_db.analytics.daily_summary
+    SELECT
+        :p_target_date AS summary_date,
+        COUNT(*) AS total_orders,
+        SUM(amount) AS total_revenue,
+        COUNT(DISTINCT customer_id) AS unique_customers
+    FROM my_project_db.raw.orders
+    WHERE order_date = :p_target_date;
+
+    -- Get row count from last DML
+    v_rows_affected := SQLROWCOUNT;
+
+    RETURN 'Success: ' || :v_rows_affected || ' rows inserted in ' ||
+           DATEDIFF('second', :v_start_time, CURRENT_TIMESTAMP()) || 's';
+END;
+$$;
+
+-- Call it
+CALL my_project_db.analytics.sp_refresh_daily_summary('2025-06-01');
+CALL my_project_db.analytics.sp_refresh_daily_summary();  -- uses default (today)
+
+-- IMPORTANT SYNTAX NOTES:
+-- • Variables need colon prefix (:var) inside SQL statements (SELECT, INSERT, etc.)
+-- • But NOT in assignments: v_rows := 5;  (no colon on left side)
+-- • SQLROWCOUNT gives affected rows from last DML (INSERT/UPDATE/DELETE/MERGE)
+-- • EXECUTE AS CALLER = user's privileges; EXECUTE AS OWNER = procedure creator's privileges
+
+-- ─────────────────────────────────────────────────────────
+-- Procedure with RESULTSET (returning query results)
+-- ─────────────────────────────────────────────────────────
+
+CREATE OR REPLACE PROCEDURE my_project_db.analytics.sp_get_top_customers(
+    p_limit INTEGER DEFAULT 10
+)
+RETURNS TABLE(customer_id VARCHAR, total_spend NUMBER(12,2), order_count INTEGER)
+LANGUAGE SQL
+AS
+$$
+DECLARE
+    res RESULTSET;
+BEGIN
+    res := (
+        SELECT
+            customer_id,
+            SUM(amount)::NUMBER(12,2) AS total_spend,
+            COUNT(*) AS order_count
+        FROM my_project_db.raw.orders
+        GROUP BY customer_id
+        ORDER BY total_spend DESC
+        LIMIT :p_limit
+    );
+    RETURN TABLE(res);
+END;
+$$;
+
+-- Call and use like a table
+SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+-- Or directly:
+CALL my_project_db.analytics.sp_get_top_customers(5);
+
+-- ─────────────────────────────────────────────────────────
+-- Anonymous Blocks (ad-hoc scripting without creating a procedure)
+-- ─────────────────────────────────────────────────────────
+
+-- Great for one-off admin tasks, migrations, backfills
+BEGIN
+    LET v_tables RESULTSET := (SHOW TABLES IN SCHEMA my_project_db.raw);
+    LET v_count INTEGER := 0;
+
+    FOR record IN v_tables DO
+        v_count := :v_count + 1;
+    END FOR;
+
+    -- Can't RETURN from anonymous block, but can use SYSTEM$LOG or just let it run
+    -- Results visible in query history
+END;
+
+-- ─────────────────────────────────────────────────────────
+-- IF / ELSE / LOOP / FOR control flow
+-- ─────────────────────────────────────────────────────────
+
+CREATE OR REPLACE PROCEDURE my_project_db.analytics.sp_conditional_example(p_mode VARCHAR)
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+$$
+BEGIN
+    IF (p_mode = 'FULL') THEN
+        TRUNCATE TABLE my_project_db.analytics.daily_summary;
+        RETURN 'Full refresh triggered';
+    ELSEIF (p_mode = 'INCREMENTAL') THEN
+        -- Only process today
+        RETURN 'Incremental mode';
+    ELSE
+        RETURN 'Unknown mode: ' || p_mode;
+    END IF;
+END;
+$$;
+
+-- LOOP example (process in batches)
+/*
+DECLARE
+    v_offset INTEGER := 0;
+    v_batch_size INTEGER := 10000;
+    v_done BOOLEAN := FALSE;
+BEGIN
+    WHILE (NOT v_done) DO
+        INSERT INTO target SELECT * FROM source LIMIT :v_batch_size OFFSET :v_offset;
+        IF (SQLROWCOUNT < :v_batch_size) THEN
+            v_done := TRUE;
+        END IF;
+        v_offset := :v_offset + :v_batch_size;
+    END WHILE;
+END;
+*/
+
+-- ─────────────────────────────────────────────────────────
+-- User-Defined Functions (UDFs)
+-- ─────────────────────────────────────────────────────────
+
+-- Scalar UDF (returns one value per row)
+CREATE OR REPLACE FUNCTION my_project_db.analytics.fn_mask_email(email VARCHAR)
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+$$
+    CASE
+        WHEN email IS NULL THEN NULL
+        WHEN POSITION('@' IN email) > 0 THEN
+            LEFT(email, 2) || '***@' || SPLIT_PART(email, '@', 2)
+        ELSE '***'
+    END
+$$;
+
+-- Use in queries just like a built-in function
+SELECT fn_mask_email('aayush@company.com');  -- 'aa***@company.com'
+
+-- Table UDF (UDTF) — returns multiple rows
+CREATE OR REPLACE FUNCTION my_project_db.analytics.fn_date_range(
+    start_date DATE, end_date DATE
+)
+RETURNS TABLE(generated_date DATE)
+LANGUAGE SQL
+AS
+$$
+    SELECT DATEADD(DAY, seq4(), start_date) AS generated_date
+    FROM TABLE(GENERATOR(ROWCOUNT => DATEDIFF(DAY, start_date, end_date) + 1))
+$$;
+
+-- Use with TABLE()
+SELECT * FROM TABLE(my_project_db.analytics.fn_date_range('2025-01-01', '2025-01-31'));
+-- Returns 31 rows, one per date
+
+-- JavaScript UDF (for logic too complex for SQL)
+CREATE OR REPLACE FUNCTION my_project_db.analytics.fn_parse_useragent(ua VARCHAR)
+RETURNS VARIANT
+LANGUAGE JAVASCRIPT
+AS
+$$
+    var result = {};
+    if (UA.indexOf('Chrome') > -1) result.browser = 'Chrome';
+    else if (UA.indexOf('Firefox') > -1) result.browser = 'Firefox';
+    else if (UA.indexOf('Safari') > -1) result.browser = 'Safari';
+    else result.browser = 'Other';
+
+    if (UA.indexOf('Windows') > -1) result.os = 'Windows';
+    else if (UA.indexOf('Mac') > -1) result.os = 'macOS';
+    else if (UA.indexOf('Linux') > -1) result.os = 'Linux';
+    else result.os = 'Other';
+
+    return result;
+$$;
+
+-- Python UDF (powerful for data science logic)
+CREATE OR REPLACE FUNCTION my_project_db.analytics.fn_levenshtein(s1 VARCHAR, s2 VARCHAR)
+RETURNS INTEGER
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.11'
+HANDLER = 'compute_distance'
+AS
+$$
+def compute_distance(s1, s2):
+    if s1 is None or s2 is None:
+        return None
+    m, n = len(s1), len(s2)
+    dp = list(range(n + 1))
+    for i in range(1, m + 1):
+        prev = dp[0]
+        dp[0] = i
+        for j in range(1, n + 1):
+            temp = dp[j]
+            if s1[i-1] == s2[j-1]:
+                dp[j] = prev
+            else:
+                dp[j] = 1 + min(dp[j], dp[j-1], prev)
+            prev = temp
+    return dp[n]
+$$;
+
+-- Use: SELECT fn_levenshtein('snowflake', 'snowflke');  → 1 (one deletion)
+
+
+-- ============================================================================
+-- 19. TRANSACTIONS & CONCURRENCY
+-- ============================================================================
+/*
+═══ SNOWFLAKE TRANSACTION MODEL ═══
+
+  • Every SQL statement is auto-committed by default (AUTOCOMMIT = TRUE)
+  • Multi-statement transactions require explicit BEGIN...COMMIT
+  • Snowflake uses MVCC (Multi-Version Concurrency Control):
+    - Readers NEVER block writers
+    - Writers NEVER block readers
+    - Concurrent writes to SAME row → last writer wins (no deadlocks)
+  • Transaction timeout: default 4 hours (can be changed)
+  • Lock wait timeout: 900 seconds (15 min) by default
+
+═══ ISOLATION LEVEL ═══
+
+  Snowflake supports READ COMMITTED only (not SERIALIZABLE):
+  • You always see the latest committed data
+  • Within a transaction, you see a consistent snapshot from when the statement started
+  • No dirty reads, no phantom reads within a single statement
+  • BUT: between statements in same transaction, data CAN change
+*/
+
+-- ─────────────────────────────────────────────────────────
+-- Explicit Transactions
+-- ─────────────────────────────────────────────────────────
+
+BEGIN TRANSACTION;
+    -- Both succeed or both fail (atomic)
+    UPDATE my_project_db.raw.orders SET status = 'SHIPPED' WHERE order_id = 'ORD001';
+    INSERT INTO my_project_db.raw.order_events (order_id, event_type, event_time)
+        VALUES ('ORD001', 'SHIPPED', CURRENT_TIMESTAMP());
+COMMIT;
+
+-- If something goes wrong:
+BEGIN TRANSACTION;
+    DELETE FROM my_project_db.analytics.daily_summary WHERE summary_date = '2025-06-01';
+    -- Oops, wrong date! Undo everything:
+ROLLBACK;
+-- Nothing was deleted
+
+-- ─────────────────────────────────────────────────────────
+-- Scoped Transactions in Procedures
+-- ─────────────────────────────────────────────────────────
+
+CREATE OR REPLACE PROCEDURE my_project_db.analytics.sp_safe_swap()
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+$$
+BEGIN
+    BEGIN TRANSACTION;
+        ALTER TABLE my_project_db.analytics.report_current RENAME TO report_old;
+        ALTER TABLE my_project_db.analytics.report_new RENAME TO report_current;
+    COMMIT;
+    RETURN 'Swap complete';
+EXCEPTION
+    WHEN OTHER THEN
+        ROLLBACK;
+        RETURN 'Error: ' || SQLERRM;
+END;
+$$;
+
+-- ─────────────────────────────────────────────────────────
+-- Locking Behavior
+-- ─────────────────────────────────────────────────────────
+/*
+  OPERATION              LOCK TYPE        BLOCKS OTHER...
+  ────────────────────   ──────────────   ───────────────────────────
+  SELECT                 None             Nothing (MVCC snapshot)
+  INSERT                 Table-level      Other INSERTs wait briefly
+  UPDATE/DELETE          Row-level        Other UPD/DEL on same rows
+  DDL (ALTER TABLE)      Schema lock      All DML on that table
+  TRUNCATE              Table lock        Everything on that table
+
+  PRACTICAL TIPS:
+  • Batch your INSERTs (one large INSERT > 1000 tiny INSERTs)
+  • Keep transactions SHORT — long transactions hold locks and block DDL
+  • DDL in transactions: ALTER TABLE, CREATE, DROP are auto-committed
+    (they CANNOT be rolled back, even inside BEGIN...COMMIT!)
+  • TRUNCATE is DDL and cannot be rolled back
+*/
+
+-- Check for blocked/waiting queries
+SELECT
+    query_id,
+    query_text,
+    user_name,
+    BLOCKED_BY_TRANSACTION_ID,
+    execution_status,
+    total_elapsed_time / 1000 AS seconds_waiting
+FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY())
+WHERE execution_status = 'BLOCKED'
+ORDER BY start_time DESC;
+
+
+-- ============================================================================
+-- 20. EXTERNAL TABLES & DATA LAKE INTEGRATION
+-- ============================================================================
+/*
+═══ WHAT ARE EXTERNAL TABLES? ═══
+
+  External tables let you query data that lives OUTSIDE Snowflake
+  (S3, Azure Blob, GCS) without loading it. The data stays in your
+  cloud storage — Snowflake just reads it on demand.
+
+  TRADEOFF:
+  ┌──────────────────────┬────────────────────────────────────────────┐
+  │ REGULAR TABLE        │ EXTERNAL TABLE                             │
+  ├──────────────────────┼────────────────────────────────────────────┤
+  │ Data IN Snowflake    │ Data in YOUR cloud storage                 │
+  │ Full query speed     │ Slower (network + no micro-partition opt.) │
+  │ You pay storage      │ No Snowflake storage cost                  │
+  │ Full DML support     │ READ-ONLY (no INSERT/UPDATE/DELETE)        │
+  │ Time Travel works    │ No Time Travel                             │
+  │ Clustering works     │ No clustering                              │
+  └──────────────────────┴────────────────────────────────────────────┘
+
+  WHEN TO USE:
+  • Data too large/expensive to copy into Snowflake
+  • Regulatory requirement to keep data in your own storage
+  • Querying data landing zone before deciding what to load
+  • Sharing data across multiple compute engines (Spark + Snowflake)
+*/
+
+-- ─────────────────────────────────────────────────────────
+-- Create an External Stage (pointer to cloud storage)
+-- ─────────────────────────────────────────────────────────
+
+-- For AWS S3:
+CREATE OR REPLACE STAGE my_project_db.raw.ext_data_lake
+    URL = 's3://my-company-data-lake/events/'
+    STORAGE_INTEGRATION = my_s3_integration  -- pre-configured by admin
+    FILE_FORMAT = (TYPE = 'PARQUET');
+
+-- ─────────────────────────────────────────────────────────
+-- Create External Table
+-- ─────────────────────────────────────────────────────────
+
+CREATE OR REPLACE EXTERNAL TABLE my_project_db.raw.ext_events (
+    event_date DATE AS (VALUE:event_date::DATE),
+    user_id VARCHAR AS (VALUE:user_id::VARCHAR),
+    event_type VARCHAR AS (VALUE:event_type::VARCHAR),
+    payload VARIANT AS (VALUE:payload::VARIANT)
+)
+PARTITION BY (event_date)  -- partition pruning on date!
+LOCATION = @my_project_db.raw.ext_data_lake
+AUTO_REFRESH = TRUE        -- auto-detect new files (via cloud event notifications)
+FILE_FORMAT = (TYPE = 'PARQUET');
+
+-- Query it like a regular table (but slower)
+SELECT event_type, COUNT(*) AS cnt
+FROM my_project_db.raw.ext_events
+WHERE event_date >= '2025-06-01'  -- partition pruning kicks in here
+GROUP BY event_type;
+
+-- ─────────────────────────────────────────────────────────
+-- Materialized Views on External Tables (speed up repeated queries)
+-- ─────────────────────────────────────────────────────────
+
+CREATE MATERIALIZED VIEW my_project_db.analytics.mv_ext_daily_events AS
+SELECT
+    event_date,
+    event_type,
+    COUNT(*) AS event_count,
+    COUNT(DISTINCT user_id) AS unique_users
+FROM my_project_db.raw.ext_events
+WHERE event_date >= '2025-01-01'
+GROUP BY event_date, event_type;
+-- Now this aggregation is pre-computed and fast!
+
+-- ─────────────────────────────────────────────────────────
+-- Directory Tables (list files on a stage)
+-- ─────────────────────────────────────────────────────────
+
+-- Enable directory table on a stage
+ALTER STAGE my_project_db.raw.ext_data_lake SET DIRECTORY = (ENABLE = TRUE);
+ALTER STAGE my_project_db.raw.ext_data_lake REFRESH;  -- populate file list
+
+-- Query the directory to see what files exist
+SELECT
+    RELATIVE_PATH,
+    SIZE,
+    LAST_MODIFIED,
+    MD5
+FROM DIRECTORY(@my_project_db.raw.ext_data_lake)
+WHERE RELATIVE_PATH LIKE '%2025-06%'
+ORDER BY LAST_MODIFIED DESC;
+
+
+-- ============================================================================
+-- 21. COMMON SQL PATTERNS & TRICKS
+-- ============================================================================
+
+-- ─────────────────────────────────────────────────────────
+-- GENERATOR: Create rows from nothing (date spines, sequences)
+-- ─────────────────────────────────────────────────────────
+
+-- Generate a sequence of numbers (0 to 99)
+SELECT SEQ4() AS num FROM TABLE(GENERATOR(ROWCOUNT => 100));
+
+-- Date spine: generate every date in a range (fill gaps in time series)
+WITH date_spine AS (
+    SELECT DATEADD(DAY, SEQ4(), '2025-01-01'::DATE) AS cal_date
+    FROM TABLE(GENERATOR(ROWCOUNT => 365))
+)
+SELECT
+    d.cal_date,
+    COALESCE(o.order_count, 0) AS order_count  -- fill missing dates with 0
+FROM date_spine d
+LEFT JOIN (
+    SELECT order_date, COUNT(*) AS order_count
+    FROM my_project_db.raw.orders
+    GROUP BY order_date
+) o ON d.cal_date = o.order_date
+ORDER BY d.cal_date;
+
+-- ─────────────────────────────────────────────────────────
+-- RECURSIVE CTEs (hierarchies, trees, org charts)
+-- ─────────────────────────────────────────────────────────
+
+-- Employee hierarchy: find all reports under a manager
+WITH RECURSIVE org_tree AS (
+    -- Anchor: start with the top-level manager
+    SELECT employee_id, employee_name, manager_id, 1 AS depth, employee_name AS path
+    FROM my_project_db.raw.employees
+    WHERE manager_id IS NULL  -- CEO/top-level
+
+    UNION ALL
+
+    -- Recursive: find employees who report to someone already in the tree
+    SELECT e.employee_id, e.employee_name, e.manager_id, t.depth + 1,
+           t.path || ' > ' || e.employee_name
+    FROM my_project_db.raw.employees e
+    JOIN org_tree t ON e.manager_id = t.employee_id
+    WHERE t.depth < 10  -- safety: prevent infinite recursion
+)
+SELECT * FROM org_tree ORDER BY path;
+
+-- ─────────────────────────────────────────────────────────
+-- OBJECT_CONSTRUCT & ARRAY_AGG (build JSON from relational data)
+-- ─────────────────────────────────────────────────────────
+
+-- Build a JSON object per customer with their orders as an array
+SELECT
+    c.customer_id,
+    c.customer_name,
+    OBJECT_CONSTRUCT(
+        'name', c.customer_name,
+        'email', c.email,
+        'total_orders', COUNT(o.order_id),
+        'total_spend', SUM(o.amount),
+        'orders', ARRAY_AGG(
+            OBJECT_CONSTRUCT(
+                'order_id', o.order_id,
+                'amount', o.amount,
+                'date', o.order_date
+            )
+        )
+    ) AS customer_json
+FROM my_project_db.raw.customers c
+LEFT JOIN my_project_db.raw.orders o ON c.customer_id = o.customer_id
+GROUP BY c.customer_id, c.customer_name, c.email;
+
+-- ─────────────────────────────────────────────────────────
+-- LISTAGG (concatenate values into a single string)
+-- ─────────────────────────────────────────────────────────
+
+-- Comma-separated list of products per order
+SELECT
+    order_id,
+    LISTAGG(product_name, ', ') WITHIN GROUP (ORDER BY product_name) AS products
+FROM my_project_db.raw.order_items
+GROUP BY order_id;
+-- Result: ORD001 → "Laptop, Mouse, Keyboard"
+
+-- LISTAGG with DISTINCT (remove duplicates)
+SELECT
+    customer_id,
+    LISTAGG(DISTINCT category, ', ') WITHIN GROUP (ORDER BY category) AS categories_purchased
+FROM my_project_db.raw.order_items
+GROUP BY customer_id;
+
+-- ─────────────────────────────────────────────────────────
+-- PIVOT and UNPIVOT (rotate rows ↔ columns)
+-- ─────────────────────────────────────────────────────────
+
+-- PIVOT: turn category rows into columns
+SELECT *
+FROM (
+    SELECT customer_id, category, amount
+    FROM my_project_db.raw.order_items
+)
+PIVOT (
+    SUM(amount)
+    FOR category IN ('Electronics', 'Clothing', 'Food')
+) AS pivoted;
+-- Result: customer_id | 'Electronics' | 'Clothing' | 'Food'
+
+-- UNPIVOT: turn columns back into rows
+SELECT *
+FROM my_project_db.analytics.quarterly_sales
+UNPIVOT (
+    revenue FOR quarter IN (q1_revenue, q2_revenue, q3_revenue, q4_revenue)
+);
+-- Result: id | quarter | revenue (one row per quarter per id)
+
+-- ─────────────────────────────────────────────────────────
+-- MATCH_RECOGNIZE (pattern matching in ordered data)
+-- ─────────────────────────────────────────────────────────
+
+-- Find "V-shaped" stock patterns: drop → drop → rise → rise
+SELECT *
+FROM my_project_db.raw.stock_prices
+MATCH_RECOGNIZE (
+    PARTITION BY ticker
+    ORDER BY trade_date
+    MEASURES
+        FIRST(DOWN.trade_date) AS pattern_start,
+        LAST(UP.trade_date) AS pattern_end,
+        FIRST(DOWN.close_price) AS start_price,
+        LAST(UP.close_price) AS end_price
+    ONE ROW PER MATCH
+    PATTERN (DOWN{2,} UP{2,})  -- 2+ downs followed by 2+ ups
+    DEFINE
+        DOWN AS close_price < LAG(close_price),
+        UP AS close_price > LAG(close_price)
+);
+
+-- ─────────────────────────────────────────────────────────
+-- QUALIFY (filter on window functions — Snowflake's secret weapon)
+-- ─────────────────────────────────────────────────────────
+
+-- Deduplication: keep latest record per customer
+SELECT *
+FROM my_project_db.raw.customers
+QUALIFY ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY updated_at DESC) = 1;
+-- This is equivalent to a subquery + WHERE rn = 1, but much cleaner!
+
+-- Top N per group: top 3 orders per customer
+SELECT customer_id, order_id, amount
+FROM my_project_db.raw.orders
+QUALIFY RANK() OVER (PARTITION BY customer_id ORDER BY amount DESC) <= 3;
+
+-- Running total filter: find when cumulative revenue first exceeds $10K
+SELECT order_date, amount,
+    SUM(amount) OVER (ORDER BY order_date) AS running_total
+FROM my_project_db.raw.orders
+QUALIFY SUM(amount) OVER (ORDER BY order_date) >= 10000
+    AND SUM(amount) OVER (ORDER BY order_date ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) < 10000;
+
+-- ─────────────────────────────────────────────────────────
+-- CONDITIONAL expressions (beyond simple CASE)
+-- ─────────────────────────────────────────────────────────
+
+-- IFF (short IF-THEN-ELSE)
+SELECT IFF(amount > 100, 'HIGH', 'LOW') AS tier FROM my_project_db.raw.orders;
+
+-- DECODE (switch-case shorthand)
+SELECT DECODE(status,
+    'NEW', 'Pending',
+    'SHIPPED', 'In Transit',
+    'DELIVERED', 'Complete',
+    'Unknown'  -- default
+) AS readable_status
+FROM my_project_db.raw.orders;
+
+-- COALESCE chain (first non-null)
+SELECT COALESCE(preferred_name, first_name, email, 'Anonymous') AS display_name
+FROM my_project_db.raw.customers;
+
+-- NVL2(expr, if_not_null, if_null) — useful for conditional logic
+SELECT NVL2(phone, 'Has Phone', 'No Phone') AS phone_status
+FROM my_project_db.raw.customers;
+
+-- ZEROIFNULL / NULLIFZERO (numeric null handling)
+SELECT
+    ZEROIFNULL(discount) AS safe_discount,     -- NULL → 0
+    NULLIFZERO(quantity) AS nullable_quantity   -- 0 → NULL (avoid divide by zero)
+FROM my_project_db.raw.order_items;
+
+-- ─────────────────────────────────────────────────────────
+-- LATERAL JOIN (correlated subqueries made readable)
+-- ─────────────────────────────────────────────────────────
+
+-- For each customer, get their 3 most recent orders
+SELECT c.customer_id, c.customer_name, recent.*
+FROM my_project_db.raw.customers c,
+LATERAL (
+    SELECT order_id, order_date, amount
+    FROM my_project_db.raw.orders o
+    WHERE o.customer_id = c.customer_id  -- correlated!
+    ORDER BY order_date DESC
+    LIMIT 3
+) recent;
+
+-- ─────────────────────────────────────────────────────────
+-- CHANGES clause (lightweight change tracking without streams)
+-- ─────────────────────────────────────────────────────────
+
+-- See what changed in a table between two points in time
+SELECT *
+FROM my_project_db.raw.orders
+CHANGES(INFORMATION => DEFAULT)
+AT(TIMESTAMP => '2025-06-01 00:00:00'::TIMESTAMP_NTZ)
+END(TIMESTAMP => '2025-06-02 00:00:00'::TIMESTAMP_NTZ);
+-- Returns: all columns + METADATA$ACTION (INSERT/DELETE) + METADATA$ISUPDATE + METADATA$ROW_ID
+
+
+-- ============================================================================
+-- 22. TROUBLESHOOTING & DEBUGGING
+-- ============================================================================
+
+-- ─────────────────────────────────────────────────────────
+-- Query Profile (THE most important debugging tool)
+-- ─────────────────────────────────────────────────────────
+/*
+  After running a query in Snowsight, click "Query Profile" to see:
+  
+  WHAT TO LOOK FOR                     WHAT IT MEANS
+  ─────────────────────────────────    ─────────────────────────────────────
+  Bytes Spilled to Local/Remote        Warehouse too small for the data volume
+                                       FIX: Scale up warehouse OR reduce data
+  
+  Partitions Scanned vs Total          Partition pruning efficiency
+                                       GOOD: scanned << total (filters working)
+                                       BAD: scanned ≈ total (full table scan!)
+                                       FIX: Add WHERE on clustered columns
+  
+  Exploding Joins (rows grow hugely)   Bad join condition (many-to-many)
+                                       FIX: Check join keys for duplicates
+  
+  Remote Disk I/O (orange bars)        Data not in local cache
+                                       Normal for first query; bad if repeated
+  
+  TableScan operator is 90%+ of time   Query is I/O bound (reading too much)
+                                       FIX: Filter earlier, use clustering
+  
+  Sort/Aggregate is 90%+ of time       Query is compute bound
+                                       FIX: Scale up warehouse, reduce data
+*/
+
+-- ─────────────────────────────────────────────────────────
+-- EXPLAIN (see execution plan WITHOUT running the query)
+-- ─────────────────────────────────────────────────────────
+
+EXPLAIN USING TEXT
+SELECT * FROM my_project_db.raw.orders WHERE order_date = '2025-06-01';
+-- Shows: operations, partitions to scan, estimated rows
+-- Useful for checking if partition pruning will work BEFORE running
+
+EXPLAIN USING JSON
+SELECT * FROM my_project_db.raw.orders WHERE order_date = '2025-06-01';
+-- JSON format for programmatic analysis
+
+-- ─────────────────────────────────────────────────────────
+-- Common Errors & Fixes
+-- ─────────────────────────────────────────────────────────
+/*
+  ERROR                                    CAUSE & FIX
+  ─────────────────────────────────────    ─────────────────────────────────────
+  "SQL compilation error:                  Missing database/schema context
+   Object does not exist"                  FIX: USE DATABASE x; USE SCHEMA y;
+                                           OR use fully qualified: db.schema.table
+  
+  "Numeric value 'abc' is not             Trying to cast string to number
+   recognized"                             FIX: Use TRY_CAST(col AS NUMBER) or
+                                           TRY_TO_NUMBER(col) → returns NULL on fail
+  
+  "Division by zero"                       Dividing by a column that has 0 values
+                                           FIX: NULLIFZERO(denominator) or
+                                           IFF(denom = 0, NULL, num/denom)
+  
+  "Insufficient privileges"                Role doesn't have GRANT for that object
+                                           FIX: SHOW GRANTS TO ROLE <role>;
+                                           Then GRANT USAGE/SELECT as needed
+  
+  "Max LOB size exceeded"                  VARCHAR > 16MB or VARIANT > 16MB
+                                           FIX: Split large payloads, or use
+                                           SPLIT/SUBSTR to chunk
+  
+  "Query timeout"                          Query ran longer than timeout setting
+                                           FIX: STATEMENT_TIMEOUT_IN_SECONDS param
+                                           OR optimize query (reduce data scanned)
+  
+  "Warehouse X cannot be resumed"          Warehouse suspended by resource monitor
+                                           FIX: ALTER RESOURCE MONITOR ... SET
+                                           CREDIT_QUOTA = <higher>;
+  
+  "Number of expressions in SET clause     MERGE has duplicate matches
+   does not match..."                      FIX: Add QUALIFY ROW_NUMBER() = 1 to
+   OR "Duplicate row detected during DML"  source to ensure 1:1 match per key
+  
+  "Transaction aborted"                    Another statement in the txn failed
+                                           FIX: Check earlier statement errors;
+                                           wrap with EXCEPTION handler
+*/
+
+-- ─────────────────────────────────────────────────────────
+-- Useful Debugging Queries
+-- ─────────────────────────────────────────────────────────
+
+-- Find long-running queries right now
+SELECT
+    query_id,
+    user_name,
+    warehouse_name,
+    query_text,
+    execution_status,
+    DATEDIFF('second', start_time, CURRENT_TIMESTAMP()) AS running_seconds
+FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_WAREHOUSE(
+    WAREHOUSE_NAME => 'COMPUTE_WH',
+    RESULT_LIMIT => 50
+))
+WHERE execution_status = 'RUNNING'
+ORDER BY start_time;
+
+-- Cancel a runaway query
+-- SELECT SYSTEM$CANCEL_QUERY('<query_id>');
+
+-- Check table freshness (when was it last updated?)
+SELECT
+    TABLE_NAME,
+    ROW_COUNT,
+    BYTES,
+    LAST_ALTERED,
+    DATEDIFF('hour', LAST_ALTERED, CURRENT_TIMESTAMP()) AS hours_since_update
+FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA = 'ANALYTICS'
+ORDER BY LAST_ALTERED DESC;
+
+-- Check warehouse load (is it overloaded?)
+SELECT
+    WAREHOUSE_NAME,
+    AVG(AVG_RUNNING) AS avg_running_queries,
+    AVG(AVG_QUEUED_LOAD) AS avg_queued_queries,  -- queued = overloaded!
+    AVG(AVG_BLOCKED) AS avg_blocked
+FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY
+WHERE START_TIME >= DATEADD('HOUR', -24, CURRENT_TIMESTAMP())
+GROUP BY WAREHOUSE_NAME
+HAVING AVG(AVG_QUEUED_LOAD) > 0
+ORDER BY avg_queued_queries DESC;
+
+
+-- ============================================================================
+-- 23. CERTIFICATION & INTERVIEW KEY POINTS
+-- ============================================================================
+/*
+═══ FREQUENTLY TESTED CONCEPTS (SnowPro Core & Interviews) ═══
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ TOPIC: TIME TRAVEL & FAIL-SAFE                                          │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │ • Standard Edition: 0–1 day Time Travel                                │
+  │ • Enterprise Edition: 0–90 days Time Travel                            │
+  │ • Fail-Safe: ALWAYS 7 days, ONLY Snowflake support can recover         │
+  │ • Transient tables: 0–1 day Time Travel, NO Fail-Safe                  │
+  │ • Temporary tables: 0–1 day Time Travel, NO Fail-Safe, session-only    │
+  │ • GOTCHA: Fail-Safe costs storage! Transient tables avoid this.        │
+  │ • GOTCHA: You CANNOT query Fail-Safe data yourself — support only!     │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ TOPIC: CLONING                                                          │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │ • Zero-copy: clone shares pointers to micro-partitions                  │
+  │ • No extra storage UNTIL you modify the clone                          │
+  │ • Can clone: databases, schemas, tables, stages (not shares!)          │
+  │ • Clone of a clone works (each independent after creation)             │
+  │ • Cloning a database clones ALL objects inside (schemas, tables, etc.) │
+  │ • GOTCHA: Pipes, streams, tasks are NOT cloned                         │
+  │ • GOTCHA: Clone inherits privileges of source at time of clone         │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ TOPIC: CACHING                                                          │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │ THREE cache layers:                                                     │
+  │                                                                         │
+  │ 1. METADATA CACHE (Cloud Services layer)                               │
+  │    • COUNT(*), MIN/MAX, schema info → instant, no warehouse needed     │
+  │    • Always active, free                                                │
+  │                                                                         │
+  │ 2. RESULT CACHE (Cloud Services layer)                                 │
+  │    • Exact same query + same data → returns cached result (24 hours)   │
+  │    • No warehouse needed! Free!                                         │
+  │    • INVALIDATED when underlying data changes                          │
+  │    • GOTCHA: CURRENT_TIMESTAMP() defeats result cache                  │
+  │    • GOTCHA: Query must be IDENTICAL (whitespace matters!)             │
+  │                                                                         │
+  │ 3. LOCAL DISK CACHE (Warehouse SSD)                                    │
+  │    • Raw data cached on warehouse nodes                                │
+  │    • Lost when warehouse suspends!                                      │
+  │    • WHY AUTO_SUSPEND=300 for prod: preserves cache                    │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ TOPIC: MICRO-PARTITIONS & CLUSTERING                                    │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │ • Each partition: 50-500MB compressed, columnar format                  │
+  │ • Snowflake auto-organizes data by insertion order                     │
+  │ • Clustering KEY = tells Snowflake how to RE-organize for your queries │
+  │ • ONLY useful on tables > 1TB (or highly filtered tables)              │
+  │ • Clustering is a BACKGROUND SERVICE (costs credits even when idle!)   │
+  │ • Check clustering health: SYSTEM$CLUSTERING_INFORMATION('table')      │
+  │ • GOTCHA: Don't cluster on high-cardinality columns (user_id = bad)   │
+  │ • BEST: Cluster on columns you filter by most (date, region, status)  │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ TOPIC: DATA SHARING                                                     │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │ • Share = a named Snowflake object containing REFERENCES to data       │
+  │ • Consumer gets READ-ONLY access; data stays in provider's account     │
+  │ • NO data copying; consumer queries provider's storage directly        │
+  │ • Real-time: consumer always sees latest data (no sync lag!)           │
+  │ • Works across accounts, regions, and cloud providers                  │
+  │ • Reader accounts: Snowflake-managed accounts for non-SF customers     │
+  │ • You can share: tables, secure views, secure UDFs                     │
+  │ • You CANNOT share: raw views (must be SECURE), stages, pipes          │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ TOPIC: WAREHOUSE SIZING & SCALING                                       │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │ • Scale UP (bigger size) = faster complex queries (more compute)       │
+  │ • Scale OUT (multi-cluster) = more concurrent users (same speed each)  │
+  │ • Doubling size → 2x cost, usually ~50% less time (not always 2x!)    │
+  │ • Multi-cluster warehouse: auto-adds clusters when queued queries > 0  │
+  │ • Economy scaling policy: slower to add clusters (saves money)         │
+  │ • Standard scaling policy: immediately adds clusters (better UX)       │
+  │ • GOTCHA: Warehouse resizing takes effect on NEXT query, not current   │
+  │ • GOTCHA: Multi-cluster doesn't help if one query is slow (scale UP)  │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ TOPIC: STREAMS & TASKS                                                  │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │ • Stream = tracks DML changes on a table (INSERT/UPDATE/DELETE)         │
+  │ • NOT a copy of data; just a pointer to the change log                 │
+  │ • Stream advances when consumed by a DML within a transaction          │
+  │ • GOTCHA: Reading stream without DML doesn't advance the offset!       │
+  │ • GOTCHA: Stream goes STALE if not consumed within Time Travel window  │
+  │ • Task = scheduled SQL (CRON or interval)                              │
+  │ • Tasks are SUSPENDED by default after creation — must RESUME!         │
+  │ • Task graphs: child tasks run after parent succeeds                   │
+  │ • SYSTEM$STREAM_HAS_DATA() → use as WHEN condition to skip empty runs │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ TOPIC: DYNAMIC TABLES vs STREAMS+TASKS                                  │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │ • Dynamic Table: declarative (just write the SELECT, SF handles rest)  │
+  │ • TARGET_LAG: how fresh you want data ('1 minute', '1 hour', etc.)    │
+  │ • SF auto-decides between full refresh and incremental                 │
+  │ • Prefer Dynamic Tables for: simple transformations, pipelines, MVs   │
+  │ • Prefer Streams+Tasks for: complex logic, conditional flows, DDL ops │
+  │ • GOTCHA: Dynamic Tables cost credits for the automated refresh!      │
+  │ • GOTCHA: Can't do INSERT/UPDATE/DELETE on a Dynamic Table (read-only)│
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ TOPIC: ROLES & RBAC HIERARCHY                                           │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │ • ACCOUNTADMIN = top role (has SYSADMIN + SECURITYADMIN)               │
+  │ • SECURITYADMIN = manages users, roles, grants                         │
+  │ • SYSADMIN = manages objects (databases, schemas, warehouses)          │
+  │ • USERADMIN = manages users and roles (subset of SECURITYADMIN)       │
+  │ • PUBLIC = default role everyone has (minimal privileges)              │
+  │ • Custom roles should inherit from SYSADMIN (best practice)           │
+  │ • GOTCHA: Objects created by ACCOUNTADMIN are only visible to it!     │
+  │           Always create objects with SYSADMIN or a custom role.        │
+  │ • GOTCHA: GRANT USAGE is needed at EVERY level (DB → Schema → Table)  │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ TOPIC: EDITION DIFFERENCES                                              │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │                                                                         │
+  │  FEATURE              │ STANDARD │ ENTERPRISE │ BUSINESS CRITICAL       │
+  │  ─────────────────────│──────────│────────────│────────────────────     │
+  │  Multi-cluster WH     │    ✗     │     ✓      │        ✓               │
+  │  Time Travel >1 day   │    ✗     │   ≤90 days │      ≤90 days          │
+  │  Materialized Views   │    ✗     │     ✓      │        ✓               │
+  │  Column Masking       │    ✗     │     ✓      │        ✓               │
+  │  Row Access Policies  │    ✗     │     ✓      │        ✓               │
+  │  Search Optimization  │    ✗     │     ✓      │        ✓               │
+  │  Data Sharing         │    ✓     │     ✓      │        ✓               │
+  │  Failover/Failback    │    ✗     │     ✗      │        ✓               │
+  │  Tri-Secret Secure    │    ✗     │     ✗      │        ✓               │
+  │  Private Connectivity │    ✗     │     ✗      │        ✓               │
+  │  HIPAA/PCI-DSS        │    ✗     │     ✗      │        ✓               │
+  │                                                                         │
+  │  REMEMBER: Most interview questions assume Enterprise Edition!         │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+═══ COMMON INTERVIEW QUESTIONS & ANSWERS ═══
+
+  Q: "How does Snowflake achieve separation of storage and compute?"
+  A: Storage is on cheap cloud object storage (S3/Blob/GCS), shared by all.
+     Compute is via independent virtual warehouses that can be started/stopped.
+     You scale each independently — big storage + small compute is fine.
+
+  Q: "What happens when you run a query with no warehouse?"
+  A: Metadata-only queries work (SHOW, DESCRIBE, COUNT from metadata).
+     Everything else fails with "no active warehouse" error.
+
+  Q: "How is zero-copy cloning possible?"
+  A: Micro-partitions are immutable. Clone just points to same partitions.
+     Only diverges (new storage) when you modify the cloned data.
+
+  Q: "What is the difference between TEMPORARY and TRANSIENT?"
+  A: TEMPORARY: visible only in current session, dropped on session end.
+     TRANSIENT: visible to all, persists, but no Fail-Safe (cheaper).
+     Both: max 1 day Time Travel.
+
+  Q: "How does partition pruning work?"
+  A: Each micro-partition stores MIN/MAX values for each column.
+     When you filter (WHERE date > X), Snowflake skips partitions where
+     MAX(date) < X. This can skip 99% of data if clustered on that column.
+
+  Q: "What's the difference between COPY INTO and INSERT INTO?"
+  A: COPY INTO: bulk loading from stages/files. Tracks loaded files (won't
+     reload same file). Highly optimized for parallel file loading.
+     INSERT INTO...SELECT: standard SQL insert. No file tracking. Uses
+     warehouse compute. Fine for table-to-table, bad for file loading.
+
+  Q: "How does Snowpipe work?"
+  A: Snowpipe uses serverless compute (not your warehouse) to auto-load
+     files as they arrive in a stage. Triggered by cloud event notifications
+     (S3 → SNS → Snowpipe) or REST API calls. Pay per-file, not per-hour.
+
+  Q: "Can you explain Snowflake's multi-cluster warehouse?"
+  A: It's a POOL of identical warehouses behind a load balancer.
+     When concurrent queries exceed capacity, new clusters auto-start.
+     Economy mode: waits before scaling (cheaper). Standard: immediate (faster).
+     MAX_CLUSTER_COUNT controls the ceiling. Good for BI dashboards with
+     many concurrent users.
+*/
+
+
+-- ============================================================================
+-- END OF NOTES - Keep this file in your workspace for permanent reference!
+-- ============================================================================
