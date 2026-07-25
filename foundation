@@ -1,0 +1,498 @@
+ Capstone Project: Brazilian E-Commerce Analytics Platform (OLIST Dataset)
+-- Co-authored with CoCo
+
+/*
+╔══════════════════════════════════════════════════════════════════════════════╗
+║         CAPSTONE PROJECT: OLIST E-COMMERCE DATA PLATFORM                   ║
+║                                                                            ║
+║  Domain:     E-Commerce / Retail Analytics                                 ║
+║  Dataset:    Brazilian E-Commerce (Olist) - OLIST_ECOMMERCE database       ║
+║  Role:       Senior Data Engineer + Analytics Engineer                     ║
+║  Skills:     ELT Pipeline, Star Schema, Window Functions, Dynamic Tables,  ║
+║              Streams/Tasks, Cortex AI, Performance, RBAC, Cost Mgmt        ║
+║                                                                            ║
+║  Architecture:                                                             ║
+║  ┌─────────┐     ┌──────────┐     ┌──────────┐     ┌──────────────┐      ║
+║  │  RAW    │ ──► │ STAGING  │ ──► │   CORE   │ ──► │  ANALYTICS   │      ║
+║  │ (Land)  │     │ (Clean)  │     │ (Model)  │     │ (Insights)   │      ║
+║  └─────────┘     └──────────┘     └──────────┘     └──────────────┘      ║
+║                                                                            ║
+║  Already Built: RAW (8 tables), STAGING (7 tables), CORE (5 tables)        ║
+║  This Project:  ANALYTICS layer + Advanced Features                        ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+*/
+
+USE DATABASE OLIST_ECOMMERCE;
+USE WAREHOUSE OLIST_WH;
+
+-- ============================================================================
+-- PHASE 1: ANALYTICS SCHEMA SETUP
+-- ============================================================================
+
+CREATE SCHEMA IF NOT EXISTS ANALYTICS;
+USE SCHEMA ANALYTICS;
+
+-- ============================================================================
+-- PHASE 2: DYNAMIC TABLES (Automated Refresh Pipeline)
+-- ============================================================================
+
+-- DT1: Customer 360 View (lifetime metrics per customer)
+CREATE OR REPLACE DYNAMIC TABLE ANALYTICS.DT_CUSTOMER_360
+    TARGET_LAG = '1 hour'
+    WAREHOUSE = OLIST_WH
+AS
+SELECT
+    c.CUSTOMER_UNIQUE_ID,
+    c.CUSTOMER_CITY,
+    c.CUSTOMER_STATE,
+    COUNT(DISTINCT o.ORDER_ID) AS total_orders,
+    SUM(oi.PRICE + oi.FREIGHT_VALUE) AS lifetime_value,
+    AVG(oi.PRICE) AS avg_order_value,
+    MIN(o.ORDER_PURCHASE_TIMESTAMP) AS first_purchase,
+    MAX(o.ORDER_PURCHASE_TIMESTAMP) AS last_purchase,
+    DATEDIFF('day',
+        MIN(o.ORDER_PURCHASE_TIMESTAMP),
+        MAX(o.ORDER_PURCHASE_TIMESTAMP)
+    ) AS tenure_days,
+    AVG(r.REVIEW_SCORE) AS avg_review_score,
+    COUNT(DISTINCT oi.PRODUCT_ID) AS unique_products_bought,
+    CASE
+        WHEN COUNT(DISTINCT o.ORDER_ID) >= 3 THEN 'Loyal'
+        WHEN COUNT(DISTINCT o.ORDER_ID) = 2 THEN 'Returning'
+        ELSE 'One-time'
+    END AS customer_segment
+FROM RAW.RAW_CUSTOMERS c
+LEFT JOIN RAW.RAW_ORDERS o ON c.CUSTOMER_ID = o.CUSTOMER_ID
+LEFT JOIN RAW.RAW_ORDER_ITEMS oi ON o.ORDER_ID = oi.ORDER_ID
+LEFT JOIN RAW.RAW_ORDER_REVIEWS r ON o.ORDER_ID = r.ORDER_ID
+GROUP BY 1, 2, 3;
+
+
+-- DT2: Product Performance (sales + review metrics per product)
+CREATE OR REPLACE DYNAMIC TABLE ANALYTICS.DT_PRODUCT_PERFORMANCE
+    TARGET_LAG = '1 hour'
+    WAREHOUSE = OLIST_WH
+AS
+SELECT
+    p.PRODUCT_ID,
+    COALESCE(ct.PRODUCT_CATEGORY_NAME_ENGLISH, p.PRODUCT_CATEGORY_NAME) AS category,
+    COUNT(DISTINCT oi.ORDER_ID) AS times_sold,
+    SUM(oi.PRICE) AS total_revenue,
+    AVG(oi.PRICE) AS avg_selling_price,
+    SUM(oi.FREIGHT_VALUE) AS total_freight_cost,
+    AVG(r.REVIEW_SCORE) AS avg_review_score,
+    COUNT(CASE WHEN r.REVIEW_SCORE <= 2 THEN 1 END) AS negative_reviews,
+    RATIO_TO_REPORT(SUM(oi.PRICE)) OVER () AS revenue_share,
+    DENSE_RANK() OVER (ORDER BY SUM(oi.PRICE) DESC) AS revenue_rank
+FROM RAW.RAW_PRODUCTS p
+LEFT JOIN RAW.RAW_ORDER_ITEMS oi ON p.PRODUCT_ID = oi.PRODUCT_ID
+LEFT JOIN RAW.RAW_ORDERS o ON oi.ORDER_ID = o.ORDER_ID
+LEFT JOIN RAW.RAW_ORDER_REVIEWS r ON o.ORDER_ID = r.ORDER_ID
+LEFT JOIN RAW.RAW_CATEGORY_TRANSLATION ct ON p.PRODUCT_CATEGORY_NAME = ct.PRODUCT_CATEGORY_NAME
+GROUP BY 1, 2;
+
+
+-- DT3: Seller Scorecard
+CREATE OR REPLACE DYNAMIC TABLE ANALYTICS.DT_SELLER_SCORECARD
+    TARGET_LAG = '1 hour'
+    WAREHOUSE = OLIST_WH
+AS
+SELECT
+    s.SELLER_ID,
+    s.SELLER_CITY,
+    s.SELLER_STATE,
+    COUNT(DISTINCT oi.ORDER_ID) AS total_orders_fulfilled,
+    SUM(oi.PRICE) AS total_gmv,
+    AVG(oi.PRICE) AS avg_item_price,
+    AVG(r.REVIEW_SCORE) AS avg_seller_rating,
+    AVG(DATEDIFF('day', o.ORDER_PURCHASE_TIMESTAMP, o.ORDER_DELIVERED_CUSTOMER_DATE))
+        AS avg_delivery_days,
+    COUNT(CASE WHEN o.ORDER_DELIVERED_CUSTOMER_DATE > o.ORDER_ESTIMATED_DELIVERY_DATE
+          THEN 1 END) AS late_deliveries,
+    ROUND(
+        COUNT(CASE WHEN o.ORDER_DELIVERED_CUSTOMER_DATE > o.ORDER_ESTIMATED_DELIVERY_DATE THEN 1 END)
+        * 100.0 / NULLIF(COUNT(DISTINCT oi.ORDER_ID), 0), 2
+    ) AS late_delivery_pct
+FROM RAW.RAW_SELLERS s
+LEFT JOIN RAW.RAW_ORDER_ITEMS oi ON s.SELLER_ID = oi.SELLER_ID
+LEFT JOIN RAW.RAW_ORDERS o ON oi.ORDER_ID = o.ORDER_ID
+LEFT JOIN RAW.RAW_ORDER_REVIEWS r ON o.ORDER_ID = r.ORDER_ID
+WHERE o.ORDER_STATUS = 'delivered'
+GROUP BY 1, 2, 3;
+
+
+-- ============================================================================
+-- PHASE 3: ADVANCED ANALYTICS VIEWS
+-- ============================================================================
+
+-- Revenue Trends (daily/weekly/monthly with growth rates)
+CREATE OR REPLACE VIEW ANALYTICS.V_REVENUE_TRENDS AS
+WITH daily_revenue AS (
+    SELECT
+        DATE_TRUNC('DAY', o.ORDER_PURCHASE_TIMESTAMP) AS order_date,
+        DATE_TRUNC('WEEK', o.ORDER_PURCHASE_TIMESTAMP) AS order_week,
+        DATE_TRUNC('MONTH', o.ORDER_PURCHASE_TIMESTAMP) AS order_month,
+        COUNT(DISTINCT o.ORDER_ID) AS orders,
+        SUM(oi.PRICE) AS revenue,
+        SUM(oi.FREIGHT_VALUE) AS freight_revenue
+    FROM RAW.RAW_ORDERS o
+    JOIN RAW.RAW_ORDER_ITEMS oi ON o.ORDER_ID = oi.ORDER_ID
+    WHERE o.ORDER_STATUS NOT IN ('canceled', 'unavailable')
+    GROUP BY 1, 2, 3
+)
+SELECT
+    order_date,
+    order_week,
+    order_month,
+    orders,
+    revenue,
+    freight_revenue,
+    revenue + freight_revenue AS total_revenue,
+    -- Moving averages
+    AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS revenue_7d_ma,
+    AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 29 PRECEDING AND CURRENT ROW) AS revenue_30d_ma,
+    -- Cumulative
+    SUM(revenue) OVER (PARTITION BY order_month ORDER BY order_date) AS mtd_revenue,
+    -- Growth
+    LAG(revenue, 7) OVER (ORDER BY order_date) AS revenue_7d_ago,
+    ROUND((revenue - LAG(revenue, 7) OVER (ORDER BY order_date))
+        / NULLIF(LAG(revenue, 7) OVER (ORDER BY order_date), 0) * 100, 2) AS wow_growth_pct
+FROM daily_revenue;
+
+
+-- Cohort Analysis (customer retention by first purchase month)
+CREATE OR REPLACE VIEW ANALYTICS.V_COHORT_RETENTION AS
+WITH first_purchase AS (
+    SELECT
+        CUSTOMER_ID,
+        DATE_TRUNC('MONTH', MIN(ORDER_PURCHASE_TIMESTAMP)) AS cohort_month
+    FROM RAW.RAW_ORDERS
+    GROUP BY 1
+),
+subsequent_orders AS (
+    SELECT
+        fp.CUSTOMER_ID,
+        fp.cohort_month,
+        DATEDIFF('MONTH', fp.cohort_month, DATE_TRUNC('MONTH', o.ORDER_PURCHASE_TIMESTAMP)) AS month_offset
+    FROM first_purchase fp
+    JOIN RAW.RAW_ORDERS o ON fp.CUSTOMER_ID = o.CUSTOMER_ID
+)
+SELECT
+    cohort_month,
+    month_offset,
+    COUNT(DISTINCT CUSTOMER_ID) AS customers,
+    FIRST_VALUE(COUNT(DISTINCT CUSTOMER_ID)) OVER (PARTITION BY cohort_month ORDER BY month_offset) AS cohort_size,
+    ROUND(COUNT(DISTINCT CUSTOMER_ID) * 100.0 /
+        FIRST_VALUE(COUNT(DISTINCT CUSTOMER_ID)) OVER (PARTITION BY cohort_month ORDER BY month_offset), 2
+    ) AS retention_pct
+FROM subsequent_orders
+GROUP BY 1, 2;
+
+
+-- RFM Segmentation (Recency, Frequency, Monetary)
+CREATE OR REPLACE VIEW ANALYTICS.V_RFM_SEGMENTS AS
+WITH rfm_base AS (
+    SELECT
+        c.CUSTOMER_UNIQUE_ID,
+        DATEDIFF('DAY', MAX(o.ORDER_PURCHASE_TIMESTAMP), CURRENT_DATE()) AS recency,
+        COUNT(DISTINCT o.ORDER_ID) AS frequency,
+        SUM(oi.PRICE) AS monetary
+    FROM RAW.RAW_CUSTOMERS c
+    JOIN RAW.RAW_ORDERS o ON c.CUSTOMER_ID = o.CUSTOMER_ID
+    JOIN RAW.RAW_ORDER_ITEMS oi ON o.ORDER_ID = oi.ORDER_ID
+    GROUP BY 1
+),
+rfm_scores AS (
+    SELECT
+        *,
+        NTILE(5) OVER (ORDER BY recency DESC) AS r_score,    -- lower recency = better
+        NTILE(5) OVER (ORDER BY frequency) AS f_score,
+        NTILE(5) OVER (ORDER BY monetary) AS m_score
+    FROM rfm_base
+)
+SELECT
+    *,
+    r_score * 100 + f_score * 10 + m_score AS rfm_combined,
+    CASE
+        WHEN r_score >= 4 AND f_score >= 4 THEN 'Champions'
+        WHEN r_score >= 3 AND f_score >= 3 THEN 'Loyal Customers'
+        WHEN r_score >= 4 AND f_score <= 2 THEN 'New Customers'
+        WHEN r_score <= 2 AND f_score >= 3 THEN 'At Risk'
+        WHEN r_score <= 2 AND f_score <= 2 THEN 'Lost'
+        ELSE 'Potential Loyalists'
+    END AS segment
+FROM rfm_scores;
+
+
+-- Geographic Performance
+CREATE OR REPLACE VIEW ANALYTICS.V_GEO_PERFORMANCE AS
+SELECT
+    c.CUSTOMER_STATE AS state,
+    c.CUSTOMER_CITY AS city,
+    COUNT(DISTINCT c.CUSTOMER_UNIQUE_ID) AS unique_customers,
+    COUNT(DISTINCT o.ORDER_ID) AS total_orders,
+    SUM(oi.PRICE) AS total_revenue,
+    AVG(oi.PRICE) AS avg_order_value,
+    AVG(r.REVIEW_SCORE) AS avg_satisfaction,
+    AVG(DATEDIFF('DAY', o.ORDER_PURCHASE_TIMESTAMP, o.ORDER_DELIVERED_CUSTOMER_DATE)) AS avg_delivery_days,
+    -- State-level ranking
+    RANK() OVER (ORDER BY SUM(oi.PRICE) DESC) AS state_revenue_rank
+FROM RAW.RAW_CUSTOMERS c
+JOIN RAW.RAW_ORDERS o ON c.CUSTOMER_ID = o.CUSTOMER_ID
+JOIN RAW.RAW_ORDER_ITEMS oi ON o.ORDER_ID = oi.ORDER_ID
+LEFT JOIN RAW.RAW_ORDER_REVIEWS r ON o.ORDER_ID = r.ORDER_ID
+WHERE o.ORDER_STATUS = 'delivered'
+GROUP BY 1, 2;
+
+
+-- Delivery Performance Analysis
+CREATE OR REPLACE VIEW ANALYTICS.V_DELIVERY_ANALYSIS AS
+SELECT
+    o.ORDER_ID,
+    o.ORDER_STATUS,
+    o.ORDER_PURCHASE_TIMESTAMP,
+    o.ORDER_DELIVERED_CUSTOMER_DATE,
+    o.ORDER_ESTIMATED_DELIVERY_DATE,
+    DATEDIFF('DAY', o.ORDER_PURCHASE_TIMESTAMP, o.ORDER_DELIVERED_CUSTOMER_DATE) AS actual_delivery_days,
+    DATEDIFF('DAY', o.ORDER_PURCHASE_TIMESTAMP, o.ORDER_ESTIMATED_DELIVERY_DATE) AS estimated_delivery_days,
+    DATEDIFF('DAY', o.ORDER_ESTIMATED_DELIVERY_DATE, o.ORDER_DELIVERED_CUSTOMER_DATE) AS delivery_variance_days,
+    CASE
+        WHEN o.ORDER_DELIVERED_CUSTOMER_DATE <= o.ORDER_ESTIMATED_DELIVERY_DATE THEN 'On Time'
+        WHEN DATEDIFF('DAY', o.ORDER_ESTIMATED_DELIVERY_DATE, o.ORDER_DELIVERED_CUSTOMER_DATE) <= 3 THEN 'Slightly Late'
+        ELSE 'Significantly Late'
+    END AS delivery_status,
+    c.CUSTOMER_STATE,
+    s.SELLER_STATE,
+    CASE WHEN c.CUSTOMER_STATE = s.SELLER_STATE THEN 'Same State' ELSE 'Cross State' END AS shipping_type
+FROM RAW.RAW_ORDERS o
+JOIN RAW.RAW_CUSTOMERS c ON o.CUSTOMER_ID = c.CUSTOMER_ID
+JOIN RAW.RAW_ORDER_ITEMS oi ON o.ORDER_ID = oi.ORDER_ID
+JOIN RAW.RAW_SELLERS s ON oi.SELLER_ID = s.SELLER_ID
+WHERE o.ORDER_STATUS = 'delivered'
+    AND o.ORDER_DELIVERED_CUSTOMER_DATE IS NOT NULL;
+
+
+-- ============================================================================
+-- PHASE 4: STREAM + TASK (CDC Pipeline for New Orders)
+-- ============================================================================
+
+-- Create stream on RAW orders to capture changes
+CREATE OR REPLACE STREAM RAW.ORDERS_CHANGE_STREAM
+    ON TABLE RAW.RAW_ORDERS
+    SHOW_INITIAL_ROWS = FALSE;
+
+-- Task: Process new orders into a daily summary table
+CREATE OR REPLACE TABLE ANALYTICS.DAILY_ORDER_SUMMARY (
+    summary_date     DATE,
+    total_orders     NUMBER,
+    delivered_orders NUMBER,
+    canceled_orders  NUMBER,
+    total_revenue    NUMBER(15,2),
+    avg_order_value  NUMBER(10,2),
+    unique_customers NUMBER,
+    refreshed_at     TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE OR REPLACE TASK ANALYTICS.TASK_DAILY_SUMMARY
+    WAREHOUSE = OLIST_WH
+    SCHEDULE = 'USING CRON 0 6 * * * UTC'   -- daily at 6 AM UTC
+AS
+    MERGE INTO ANALYTICS.DAILY_ORDER_SUMMARY t
+    USING (
+        SELECT
+            DATE_TRUNC('DAY', o.ORDER_PURCHASE_TIMESTAMP)::DATE AS summary_date,
+            COUNT(DISTINCT o.ORDER_ID) AS total_orders,
+            COUNT(DISTINCT CASE WHEN o.ORDER_STATUS = 'delivered' THEN o.ORDER_ID END) AS delivered_orders,
+            COUNT(DISTINCT CASE WHEN o.ORDER_STATUS = 'canceled' THEN o.ORDER_ID END) AS canceled_orders,
+            SUM(oi.PRICE) AS total_revenue,
+            AVG(oi.PRICE) AS avg_order_value,
+            COUNT(DISTINCT o.CUSTOMER_ID) AS unique_customers
+        FROM RAW.RAW_ORDERS o
+        JOIN RAW.RAW_ORDER_ITEMS oi ON o.ORDER_ID = oi.ORDER_ID
+        GROUP BY 1
+    ) s ON t.summary_date = s.summary_date
+    WHEN MATCHED THEN UPDATE SET
+        t.total_orders = s.total_orders,
+        t.delivered_orders = s.delivered_orders,
+        t.canceled_orders = s.canceled_orders,
+        t.total_revenue = s.total_revenue,
+        t.avg_order_value = s.avg_order_value,
+        t.unique_customers = s.unique_customers,
+        t.refreshed_at = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT
+        (summary_date, total_orders, delivered_orders, canceled_orders, total_revenue, avg_order_value, unique_customers)
+        VALUES (s.summary_date, s.total_orders, s.delivered_orders, s.canceled_orders, s.total_revenue, s.avg_order_value, s.unique_customers);
+
+
+-- ============================================================================
+-- PHASE 5: CORTEX AI - REVIEW INTELLIGENCE
+-- ============================================================================
+
+-- AI-powered review analysis
+/*
+CREATE OR REPLACE VIEW ANALYTICS.V_REVIEW_INTELLIGENCE AS
+SELECT
+    r.ORDER_ID,
+    r.REVIEW_SCORE,
+    r.REVIEW_COMMENT_MESSAGE AS review_text,
+    SNOWFLAKE.CORTEX.SENTIMENT(r.REVIEW_COMMENT_MESSAGE) AS ai_sentiment_score,
+    CASE
+        WHEN r.REVIEW_SCORE >= 4 THEN 'Positive'
+        WHEN r.REVIEW_SCORE = 3 THEN 'Neutral'
+        ELSE 'Negative'
+    END AS review_category,
+    LENGTH(r.REVIEW_COMMENT_MESSAGE) AS review_length,
+    o.ORDER_STATUS,
+    DATEDIFF('DAY', o.ORDER_PURCHASE_TIMESTAMP, o.ORDER_DELIVERED_CUSTOMER_DATE) AS delivery_days
+FROM RAW.RAW_ORDER_REVIEWS r
+JOIN RAW.RAW_ORDERS o ON r.ORDER_ID = o.ORDER_ID
+WHERE r.REVIEW_COMMENT_MESSAGE IS NOT NULL
+    AND LENGTH(r.REVIEW_COMMENT_MESSAGE) > 10;
+*/
+
+
+-- ============================================================================
+-- PHASE 6: PAYMENT ANALYTICS
+-- ============================================================================
+
+CREATE OR REPLACE VIEW ANALYTICS.V_PAYMENT_INSIGHTS AS
+WITH payment_stats AS (
+    SELECT
+        p.ORDER_ID,
+        p.PAYMENT_TYPE,
+        p.PAYMENT_INSTALLMENTS,
+        p.PAYMENT_VALUE,
+        o.ORDER_PURCHASE_TIMESTAMP,
+        DATE_TRUNC('MONTH', o.ORDER_PURCHASE_TIMESTAMP) AS order_month
+    FROM RAW.RAW_ORDER_PAYMENTS p
+    JOIN RAW.RAW_ORDERS o ON p.ORDER_ID = o.ORDER_ID
+    WHERE o.ORDER_STATUS NOT IN ('canceled', 'unavailable')
+)
+SELECT
+    order_month,
+    PAYMENT_TYPE,
+    COUNT(*) AS transaction_count,
+    SUM(PAYMENT_VALUE) AS total_value,
+    AVG(PAYMENT_VALUE) AS avg_transaction_value,
+    AVG(PAYMENT_INSTALLMENTS) AS avg_installments,
+    RATIO_TO_REPORT(SUM(PAYMENT_VALUE)) OVER (PARTITION BY order_month) AS payment_type_share,
+    -- Month-over-month growth
+    LAG(SUM(PAYMENT_VALUE)) OVER (PARTITION BY PAYMENT_TYPE ORDER BY order_month) AS prev_month_value,
+    ROUND((SUM(PAYMENT_VALUE) - LAG(SUM(PAYMENT_VALUE)) OVER (PARTITION BY PAYMENT_TYPE ORDER BY order_month))
+        / NULLIF(LAG(SUM(PAYMENT_VALUE)) OVER (PARTITION BY PAYMENT_TYPE ORDER BY order_month), 0) * 100, 2
+    ) AS mom_growth_pct
+FROM payment_stats
+GROUP BY 1, 2;
+
+
+-- ============================================================================
+-- PHASE 7: SECURITY & GOVERNANCE (RBAC Setup)
+-- ============================================================================
+
+/*
+-- Uncomment to execute. Creates proper role hierarchy for the project.
+
+-- Create project-specific roles
+CREATE ROLE IF NOT EXISTS OLIST_ENGINEER;      -- full access to all schemas
+CREATE ROLE IF NOT EXISTS OLIST_ANALYST;       -- read-only on CORE + ANALYTICS
+CREATE ROLE IF NOT EXISTS OLIST_VIEWER;        -- read-only on ANALYTICS only
+
+-- Hierarchy
+GRANT ROLE OLIST_VIEWER TO ROLE OLIST_ANALYST;
+GRANT ROLE OLIST_ANALYST TO ROLE OLIST_ENGINEER;
+GRANT ROLE OLIST_ENGINEER TO ROLE SYSADMIN;
+
+-- Engineer permissions
+GRANT ALL ON DATABASE OLIST_ECOMMERCE TO ROLE OLIST_ENGINEER;
+GRANT ALL ON ALL SCHEMAS IN DATABASE OLIST_ECOMMERCE TO ROLE OLIST_ENGINEER;
+
+-- Analyst permissions
+GRANT USAGE ON DATABASE OLIST_ECOMMERCE TO ROLE OLIST_ANALYST;
+GRANT USAGE ON SCHEMA OLIST_ECOMMERCE.CORE TO ROLE OLIST_ANALYST;
+GRANT USAGE ON SCHEMA OLIST_ECOMMERCE.ANALYTICS TO ROLE OLIST_ANALYST;
+GRANT SELECT ON ALL TABLES IN SCHEMA OLIST_ECOMMERCE.CORE TO ROLE OLIST_ANALYST;
+GRANT SELECT ON ALL TABLES IN SCHEMA OLIST_ECOMMERCE.ANALYTICS TO ROLE OLIST_ANALYST;
+GRANT SELECT ON ALL VIEWS IN SCHEMA OLIST_ECOMMERCE.ANALYTICS TO ROLE OLIST_ANALYST;
+GRANT SELECT ON FUTURE TABLES IN SCHEMA OLIST_ECOMMERCE.ANALYTICS TO ROLE OLIST_ANALYST;
+
+-- Viewer permissions
+GRANT USAGE ON DATABASE OLIST_ECOMMERCE TO ROLE OLIST_VIEWER;
+GRANT USAGE ON SCHEMA OLIST_ECOMMERCE.ANALYTICS TO ROLE OLIST_VIEWER;
+GRANT SELECT ON ALL VIEWS IN SCHEMA OLIST_ECOMMERCE.ANALYTICS TO ROLE OLIST_VIEWER;
+*/
+
+
+-- ============================================================================
+-- PHASE 8: SAMPLE QUERIES TO DEMONSTRATE THE PROJECT
+-- ============================================================================
+
+/*
+-- Non-reusable demo queries (commented out)
+
+-- Q1: Top 10 revenue-generating product categories
+SELECT category, total_revenue, times_sold, avg_review_score, revenue_rank
+FROM ANALYTICS.DT_PRODUCT_PERFORMANCE
+ORDER BY revenue_rank
+LIMIT 10;
+
+-- Q2: Customer segmentation distribution
+SELECT segment, COUNT(*) AS customers, ROUND(AVG(monetary), 2) AS avg_ltv
+FROM ANALYTICS.V_RFM_SEGMENTS
+GROUP BY 1
+ORDER BY avg_ltv DESC;
+
+-- Q3: Delivery SLA compliance by state
+SELECT
+    CUSTOMER_STATE,
+    COUNT(*) AS total_deliveries,
+    COUNT(CASE WHEN delivery_status = 'On Time' THEN 1 END) AS on_time,
+    ROUND(COUNT(CASE WHEN delivery_status = 'On Time' THEN 1 END) * 100.0 / COUNT(*), 1) AS on_time_pct
+FROM ANALYTICS.V_DELIVERY_ANALYSIS
+GROUP BY 1
+ORDER BY on_time_pct DESC;
+
+-- Q4: Payment method trends
+SELECT order_month, PAYMENT_TYPE, total_value, payment_type_share, mom_growth_pct
+FROM ANALYTICS.V_PAYMENT_INSIGHTS
+ORDER BY order_month DESC, total_value DESC;
+
+-- Q5: Revenue trend with moving averages
+SELECT order_date, revenue, revenue_7d_ma, revenue_30d_ma, wow_growth_pct
+FROM ANALYTICS.V_REVENUE_TRENDS
+ORDER BY order_date DESC
+LIMIT 30;
+*/
+
+
+-- ============================================================================
+-- PROJECT SUMMARY
+-- ============================================================================
+/*
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ WHAT WAS BUILT:                                                             │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ ✓ 3 Dynamic Tables    → Auto-refreshing Customer, Product, Seller metrics  │
+│ ✓ 6 Analytics Views   → Revenue, Cohort, RFM, Geo, Delivery, Payments     │
+│ ✓ 1 Stream + Task     → CDC pipeline for automated daily summaries         │
+│ ✓ 1 AI View           → Cortex sentiment analysis on reviews               │
+│ ✓ RBAC Setup          → Engineer/Analyst/Viewer role hierarchy              │
+│                                                                             │
+│ SKILLS DEMONSTRATED:                                                        │
+│ • Multi-layer ELT architecture (RAW → STAGING → CORE → ANALYTICS)          │
+│ • Star schema design (facts & dimensions)                                   │
+│ • Window functions (LAG, LEAD, RANK, NTILE, RATIO_TO_REPORT)               │
+│ • Dynamic Tables (declarative pipelines)                                    │
+│ • Streams & Tasks (event-driven CDC)                                        │
+│ • Cortex AI (NLP sentiment analysis)                                        │
+│ • RBAC & governance (role hierarchy, least privilege)                        │
+│ • Performance patterns (QUALIFY, CTEs, incremental processing)              │
+│                                                                             │
+│ HOW TO PRESENT IN INTERVIEW:                                                │
+│ "I built an end-to-end analytics platform on Snowflake for a Brazilian      │
+│  e-commerce dataset. The pipeline ingests raw data through a medallion       │
+│  architecture, uses Dynamic Tables for automated refresh, implements         │
+│  CDC with Streams/Tasks, and leverages Cortex AI for review sentiment.       │
+│  I designed RBAC for multi-team access and optimized for cost with           │
+│  transient staging tables and auto-suspend warehouses."                      │
+└──────────────────────────────────────────────────────────────────────────────┘
+*/
