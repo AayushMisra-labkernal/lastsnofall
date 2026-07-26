@@ -1,0 +1,1 @@
+its all over but helped a lot to me to underttand the concept in snowflake whethere its reult analysis,ecommerce,ultimate de project,aws snow core and all help me to build my mind but this  is the end of all the things i tried till now to achieve 
